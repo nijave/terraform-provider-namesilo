@@ -21,8 +21,9 @@ administrative, technical, and billing contact for every domain, the API manages
 profiles with `contactAdd`/`contactList`/`contactUpdate`/`contactDelete` and
 associates them with `contactDomainAssociate`, and there is no way to keep that
 in version control without a provider. The registrar lock
-(`domainLock`/`domainUnlock`), the domain inventory (`listDomains`), and
-`getDomainInfo` cover the rest of what an operator audits. An existing
+(`domainLock`/`domainUnlock`), the auto-renew setting
+(`addAutoRenewal`/`removeAutoRenewal`), the domain inventory (`listDomains`),
+and `getDomainInfo` cover the rest of what an operator audits. An existing
 community Go client (`github.com/nrdcg/namesilo`) covers the operations but is
 generated from 2019 documentation and returns raw responses in errors; this
 provider owns its small client instead, for control over diagnostics and API-key
@@ -72,6 +73,11 @@ resource "namesilo_domain_lock" "example" {
   locked = true
 }
 
+resource "namesilo_auto_renew" "example" {
+  domain  = "example.com"
+  enabled = true
+}
+
 data "namesilo_domains" "all" {}
 
 output "expiring_first" {
@@ -85,9 +91,9 @@ output "expiring_first" {
 
 - The provider binary, its configuration, and an `internal/namesilo` HTTP client
   for the operations needed.
-- Six resources: `namesilo_nameservers`, `namesilo_dnssec_records`,
-  `namesilo_privacy`, `namesilo_contact`, `namesilo_domain_contacts`, and
-  `namesilo_domain_lock`.
+- Seven resources: `namesilo_nameservers`, `namesilo_dnssec_records`,
+  `namesilo_privacy`, `namesilo_contact`, `namesilo_domain_contacts`,
+  `namesilo_domain_lock`, and `namesilo_auto_renew`.
 - Six data sources: the same names for the per-domain settings and contacts,
   plus `namesilo_domain` (one domain's `getDomainInfo` view) and
   `namesilo_domains` (the account's domain inventory).
@@ -101,7 +107,7 @@ output "expiring_first" {
 - Zone-level DNS records (A, AAAA, CNAME, MX, TXT, and NS records inside
   NameSilo's managed zone). Only registrar-level settings are managed. The
   client is structured so an operation can be added later without rework.
-- Domain registration, renewal, transfer, and auto-renewal.
+- Domain registration, renewal, and transfer.
 - NameSilo's "registered nameservers" feature (`addRegisteredNameServer` and
   friends), which manages glue/child nameservers rather than delegation.
 - DNSSEC key management. The provider publishes DS records; it does not generate
@@ -146,7 +152,7 @@ terraform-provider-namesilo/
     namesilo/                          # pure Go, zero Terraform imports
       client.go                        # Client, request building, XML envelope
       errors.go                        # APIError, reply-code classification
-      domain.go                        # GetDomainInfo, ChangeNameServers, ListDomains, DomainLock, DomainUnlock
+      domain.go                        # GetDomainInfo, ChangeNameServers, ListDomains, DomainLock, DomainUnlock, AddAutoRenew, RemoveAutoRenew
       dnssec.go                        # ListDSRecords, AddDSRecord, DeleteDSRecord
       privacy.go                       # AddPrivacy, RemovePrivacy
       contact.go                       # ListContacts, AddContact, UpdateContact, DeleteContact, AssociateContacts
@@ -163,6 +169,7 @@ terraform-provider-namesilo/
       resource_contact.go              # namesilo_contact
       resource_domain_contacts.go      # namesilo_domain_contacts
       resource_domain_lock.go          # namesilo_domain_lock
+      resource_auto_renew.go           # namesilo_auto_renew
       data_source_nameservers.go       # namesilo_nameservers
       data_source_dnssec_records.go    # namesilo_dnssec_records
       data_source_privacy.go           # namesilo_privacy
@@ -180,6 +187,7 @@ terraform-provider-namesilo/
     resources/contact.md               # generated
     resources/domain_contacts.md       # generated
     resources/domain_lock.md           # generated
+    resources/auto_renew.md            # generated
     data-sources/nameservers.md        # generated
     data-sources/dnssec_records.md     # generated
     data-sources/privacy.md            # generated
@@ -195,6 +203,7 @@ terraform-provider-namesilo/
     resources/namesilo_contact/{resource.tf,import.sh}
     resources/namesilo_domain_contacts/{resource.tf,import.sh}
     resources/namesilo_domain_lock/{resource.tf,import.sh}
+    resources/namesilo_auto_renew/{resource.tf,import.sh}
     data-sources/namesilo_nameservers/data-source.tf
     data-sources/namesilo_dnssec_records/data-source.tf
     data-sources/namesilo_privacy/data-source.tf
@@ -246,6 +255,10 @@ is a thin translation between `types.*` values and those functions.
   `locked` (`Yes`/`No`) and `domainLock`/`domainUnlock` toggle it. Like privacy,
   the "already locked" (252) and "already unlocked" (253) replies mean the
   desired state holds and are accepted as success for these two operations only.
+- **Auto-renew** is a boolean on the domain. `getDomainInfo` reports it as
+  `auto_renew` (`Yes`/`No`) and `addAutoRenewal`/`removeAutoRenewal` toggle it;
+  "already set to AutoRenew" (250) and "already set not to AutoRenew" (251) are
+  success for their operation only.
 - **`getDomainInfo` is the shared read** for nameservers, privacy, contact
   associations, and lock state. `namesilo_domain` exposes the whole reply;
   `ListDomains` is the account inventory and returns only name and dates.
@@ -289,6 +302,12 @@ Invariants that harness and acceptance tests assert:
     client requests pages until it has `pager.total` domains, and an API that
     ignores the paging parameters terminates after the first repeated page and
     the data source warns that the list may be short.
+14. `enabled = false` is a valid auto-renew configuration that issues
+    `removeAutoRenewal` and tolerates code 251; `enabled = true` issues
+    `addAutoRenewal` and tolerates code 250.
+15. Destroying `namesilo_auto_renew` calls `removeAutoRenewal` only when the
+    state says enabled; destroying a resource that declared `enabled = false`
+    makes no API call.
 
 ## 5. Provider configuration
 
@@ -562,7 +581,29 @@ Markdown description must state that unlocking a domain removes the main
 safeguard against an unauthorized transfer, and that some registry states
 (pending transfer, for example) reject both operations, surfacing the API error.
 
-### 6.7 ModifyPlan and drift
+### 6.7 `namesilo_auto_renew`
+
+| Attribute | Type | Required/Optional/Computed | Modifiers and validators |
+| --- | --- | --- | --- |
+| `domain` | `string` | Required | `stringplanmodifier.RequiresReplace()` |
+| `enabled` | `bool` | Required | none |
+| `id` | `string` | Computed | domain value, `UseStateForUnknown` |
+
+Auto-renew is what causes NameSilo to charge the account and renew the domain
+at expiry. `enabled = false` is a valid declaration that the domain must be left
+to expire.
+
+**Create/Update:** `AddAutoRenew` or `RemoveAutoRenew` for the desired state,
+called only when the plan and state disagree, accepting 250 and 251 as success
+so a race with the web UI cannot fail the apply.
+
+**Read:** `GetDomainInfo(domain)` → `auto_renew`.
+
+**Delete:** when state says enabled, `RemoveAutoRenew(domain)`; otherwise no API
+call. Removing the resource from configuration stops automatic renewal, which
+the description states plainly alongside the risk that the domain expires.
+
+### 6.8 ModifyPlan and drift
 
 `namesilo_nameservers`, `namesilo_dnssec_records`, and `namesilo_contact` use
 `ModifyPlan` only to normalize configured values to the shape Read writes:
@@ -572,8 +613,8 @@ beyond `namesilo_contact`'s `default_profile`, which is set in Create as
 described in §6.4; `id` uses `UseStateForUnknown`, and no attribute is
 `Computed` other than `id`, `default_profile`, and the four optional roles of
 `namesilo_domain_contacts`. `namesilo_privacy`, `namesilo_domain_contacts`,
-and `namesilo_domain_lock` need no plan modifier: booleans and opaque contact
-IDs have nothing to normalize.
+`namesilo_domain_lock`, and `namesilo_auto_renew` need no plan modifier:
+booleans and opaque contact IDs have nothing to normalize.
 
 Normalization at plan time is what keeps a lowercase-only API from producing a
 perpetual diff. The plan, the applied state, and the next plan's normalized
@@ -671,14 +712,14 @@ The XML envelope is:
 </namesilo>
 ```
 
-Codes 300, 301, and 302 are success. Codes 255/256 ("already Private"/"already
-Not Private") are success for the privacy operations, and 252/253 ("already
-Locked"/"already Unlocked") are success for the lock operations: each means the
-requested state already holds, and treating it as an error would make an
-idempotent apply fail. The classification is per operation, so a 252 from an
-unsupported operation is still an error. Anything else is an `*APIError`
-carrying `Operation`, `Code`, and `Detail`. The relevant failure codes, from
-NameSilo's published list:
+Codes 300, 301, and 302 are success. Codes 250/251 ("already set to
+AutoRenew"/"already set not to AutoRenew"), 252/253 ("already Locked"/"already
+Unlocked"), and 255/256 ("already Private"/"already Not Private") are success
+for their own operation: each means the requested state already holds, and
+treating it as an error would make an idempotent apply fail. The classification
+is per operation, so a 250 from an unrelated operation is still an error.
+Anything else is an `*APIError` carrying `Operation`, `Code`, and `Detail`.
+The relevant failure codes, from NameSilo's published list:
 
 | Code | Meaning |
 | --- | --- |
@@ -688,6 +729,8 @@ NameSilo's published list:
 | 115 | Central registry not responding |
 | 200 | Domain is not active, or does not belong to this user |
 | 210 | General error (detail in the reply) |
+| 250 | Already set to AutoRenew; success for `addAutoRenewal` |
+| 251 | Already set not to AutoRenew; success for `removeAutoRenewal` |
 | 252 | Domain is already locked; success for `domainLock` |
 | 253 | Domain is already unlocked; success for `domainUnlock` |
 | 254 | Nameserver update error |
@@ -716,6 +759,8 @@ func (c *Client) AddPrivacy(ctx context.Context, domain string) error
 func (c *Client) RemovePrivacy(ctx context.Context, domain string) error
 func (c *Client) DomainLock(ctx context.Context, domain string) error
 func (c *Client) DomainUnlock(ctx context.Context, domain string) error
+func (c *Client) AddAutoRenew(ctx context.Context, domain string) error
+func (c *Client) RemoveAutoRenew(ctx context.Context, domain string) error
 func (c *Client) ListContacts(ctx context.Context, contactID string) ([]Contact, error)
 func (c *Client) AddContact(ctx context.Context, contact Contact) (string, error)
 func (c *Client) UpdateContact(ctx context.Context, contact Contact) error
@@ -808,7 +853,7 @@ whose text is the name and whose `position` attribute is an index, and a
 `contact_ids` element with `registrant`, `administrative`, `technical`, and
 `billing` children. `changeNameServers` takes `domain` plus `ns1`–`ns13`, of
 which the first two are required. `addPrivacy`, `removePrivacy`, `domainLock`,
-and `domainUnlock` take only `domain`.
+`domainUnlock`, `addAutoRenewal`, and `removeAutoRenewal` take only `domain`.
 
 `listDomains` takes an optional `portfolio` filter (not exposed in v1) and
 returns `domains > domain` elements whose text is the name and whose `created`
@@ -912,11 +957,12 @@ to call Update.
   is the API's `contact_id`.
 - Import is `tofu import namesilo_nameservers.example example.com` and the same
   form for `namesilo_dnssec_records`, `namesilo_privacy`,
-  `namesilo_domain_contacts`, and `namesilo_domain_lock`. `namesilo_contact`
-  imports by `contact_id`. `ImportState` sets `domain` or `id` from the import
-  ID and leaves everything else to `Read`, so an imported resource converges on
-  the real state without a config-specific seed (unlike the accumulator, which
-  had no external system to read).
+  `namesilo_domain_contacts`, `namesilo_domain_lock`, and
+  `namesilo_auto_renew`. `namesilo_contact` imports by `contact_id`.
+  `ImportState` sets `domain` or `id` from the import ID and leaves everything
+  else to `Read`, so an imported resource converges on the real state without a
+  config-specific seed (unlike the accumulator, which had no external system to
+  read).
 - Importing a domain with no DS records produces an empty set, which is a valid
   configuration (`records = []`) and therefore an empty plan once the config
   matches.
@@ -962,11 +1008,12 @@ Three tiers, each hermetic or opt-in; `make test` runs the first two.
 - Pure helpers: `NormalizeNameserver(s)`, `SameNameservers`, `NormalizeDSRecord`,
   `DiffDSRecords` including empty inputs, adds and removes in one diff,
   case-only differences, and deterministic ordering.
-- Privacy and lock: `addPrivacy`/`removePrivacy`/`domainLock`/`domainUnlock`
-  request shapes, and reply-code classification for 252/253/255/256, which are
-  success for their operation and errors for every other operation. `private`,
-  `locked`, `auto_renew`, and `email_verification_required` parsing accepts
-  `Yes`/`No` in any case and errors on anything else.
+- Privacy and toggles: `addPrivacy`/`removePrivacy`, `domainLock`/
+  `domainUnlock`, and `addAutoRenewal`/`removeAutoRenewal` request shapes, and
+  reply-code classification for 250/251/252/253/255/256, which are success for
+  their operation and errors for every other operation. `private`, `locked`,
+  `auto_renew`, and `email_verification_required` parsing accepts `Yes`/`No` in
+  any case and errors on anything else.
 - Domain inventory: `listDomains` with one page, with multiple pages, with a
   `total` larger than what pagination returns (the duplicate-page guard), and
   with an empty account. Request assertions cover `page` and `pageSize`, and a
@@ -1022,6 +1069,9 @@ Cases:
 | lock create | The fake recorded `domainLock` or `domainUnlock` for the configured `locked` value, and each is idempotent against the fake's already-in-state reply |
 | lock drift | Toggling the fake's `locked` out of band plans an update in the opposite direction |
 | lock destroy | Destroy calls `domainUnlock` when the state says locked, and makes no call when unlocked |
+| auto-renew create | The fake recorded `addAutoRenewal` or `removeAutoRenewal` for the configured `enabled` value, each idempotent against the fake's already-in-state reply |
+| auto-renew drift | Flipping the fake's `auto_renew` out of band plans an update in the opposite direction |
+| auto-renew destroy | Destroy calls `removeAutoRenewal` when enabled, and makes no call when disabled |
 | domain data source | Every `getDomainInfo` field is returned, booleans parsed, nameservers lowercased |
 | domains data source | Multiple fake pages are combined and match the fake's domain set; `total` matches |
 | domains paging guard | A fake that ignores `page` does not loop and the data source emits the incomplete-list warning |
@@ -1036,7 +1086,7 @@ Cases:
 | association update | Changing one role sends one call with that role and leaves the rest |
 | association drift | Reassigning a role in the fake plans an update for that role only |
 | association destroy | Destroy makes no API call and leaves the fake's associations intact |
-| import all six | Import yields state that matches the fake and plans empty |
+| import all seven | Import yields state that matches the fake and plans empty |
 | data sources | All six return normalized values that match the fake |
 
 ### 12.3 Live acceptance tests (`internal/provider`, opt-in)
@@ -1052,23 +1102,26 @@ because they add and delete profiles in a live account, association tests
 require `NAMESILO_TEST_DOMAIN_CONTACTS=1` because changing a domain's registrant
 can trigger registry verification and, for some TLDs, is restricted, and lock
 mutation tests require `NAMESILO_TEST_LOCK=1` because unlocking a live domain
-removes its main transfer safeguard.
+removes its main transfer safeguard. Auto-renew mutation tests need no extra
+gate: the resource's own lifecycle toggles the flag, and destroy turns renewal
+off, which is harmless on a domain that is only used for these tests.
 
 `NAMESILO_TEST_DOMAIN` must be a **disposable domain** in the account: the
 nameserver tests repoint its delegation (to `ns1.example.net`/`ns2.example.net`
 and back to the dnsowl defaults on destroy), the DS tests publish and delete a
 synthetic DS record, which makes the domain fail DNSSEC validation while it
-exists, the privacy and lock tests toggle their flags, and the association tests
-repoint a role at a throwaway profile.
+exists, the privacy, lock, and auto-renew tests toggle their flags, and the
+association tests repoint a role at a throwaway profile.
 
 Cases: read all six data sources; create/read/update/destroy the nameservers
 resource and assert quiet plans; import every resource; add, roll, and remove a
 DS record; enable, disable, and re-enable privacy; create, update, and delete a
 contact profile; reassign a domain role and assert the other roles are
-untouched; lock and unlock; and assert the `namesilo_domains` list contains
-`NAMESILO_TEST_DOMAIN` with `total` at least the number of returned rows.
-Nothing in CI requires these; they are the contract check that the XML fixtures
-match the real API, and they run with `make testacc-live`.
+untouched; lock and unlock; enable and disable auto-renew; and assert the
+`namesilo_domains` list contains `NAMESILO_TEST_DOMAIN` with `total` at least
+the number of returned rows. Nothing in CI requires these; they are the contract
+check that the XML fixtures match the real API, and they run with
+`make testacc-live`.
 
 ## 13. Documentation
 
@@ -1142,7 +1195,7 @@ OpenTofu instead.
 - **Own client over `nrdcg/namesilo`.** The library is maintained and its
   licence is fine, but it is generated from 2019 documentation, embeds raw
   response bodies in errors (an API-key redaction problem, since the request
-  carries the key), and wraps nothing we would not write ourselves. Fifteen
+  carries the key), and wraps nothing we would not write ourselves. Seventeen
   small GET operations do not justify the dependency.
 - **XML over JSON.** The API serves both, but only XML is documented with
   examples and exercised by every community client; the JSON shape is
@@ -1173,12 +1226,13 @@ OpenTofu instead.
   by the project owner. `enabled = false` lets configuration assert "this domain
   must not use PrivacyGuardian", which a presence-only resource cannot express,
   and it makes drift visible in both directions.
-- **Already-in-state replies are success for their own operation only.** 255
-  and 256 mean "already private"/"already not private"; 252 and 253 mean
-  "already locked"/"already unlocked". Treating them as errors, as the
-  community Go client does, would make a converging apply fail. The
-  classification is per operation, so one of these codes from an unrelated
-  operation is still an error.
+- **Already-in-state replies are success for their own operation only.** 250
+  and 251 mean "already set to AutoRenew"/"already set not to AutoRenew"; 252
+  and 253 mean "already locked"/"already unlocked"; 255 and 256 mean "already
+  private"/"already not private". Treating them as errors, as the community Go
+  client does, would make a converging apply fail. The classification is per
+  operation, so one of these codes from an unrelated operation is still an
+  error.
 - **Contact profiles and contact associations are separate resources.** A
   profile is account-scoped and can be referenced by many domains; an
   association is domain-scoped. Merging them would recreate the profile on
@@ -1217,6 +1271,12 @@ OpenTofu instead.
   project owner, matching the privacy resource: removing the resource releases
   what it manages. The description says that this removes the main safeguard
   against an unauthorized transfer.
+- **Destroying `namesilo_auto_renew` disables renewal when enabled.** Chosen by
+  the project owner, consistent with privacy and lock. The description says
+  that removing the resource stops automatic renewal and that the domain can
+  then expire. This is the most consequential destroy in the provider: the
+  others cost an outage or a missing safety net, this one can lose the domain,
+  which is why the resource description and README call it out.
 - **No provider-defined functions or ephemeral resources.** Nothing in the
   scope needs either.
 
@@ -1256,5 +1316,8 @@ OpenTofu instead.
   §7, and never sees a silently truncated list.
 - Some registry states reject `domainLock` and `domainUnlock` (a pending
   transfer, for example); the API error is surfaced unchanged.
+- Auto-renew is not offered by every TLD, and renewal charges the account when
+  it fires; the API error or the resulting charge is outside the provider's
+  control.
 - The sandbox environment requires credentials from NameSilo support; the
   `endpoint` attribute makes it usable, but CI cannot exercise it.
