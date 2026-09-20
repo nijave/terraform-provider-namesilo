@@ -15,11 +15,15 @@ record for each signing key, and neither belongs in the zone itself.
 The NameSilo web UI can do both, and the NameSilo API exposes both, but the API
 has no Terraform provider. The same gap exists for WHOIS privacy: whether
 PrivacyGuardian is on is registrar state, and the API can toggle it with
-`addPrivacy` and `removePrivacy`, so the provider manages that too. An existing
-community Go client (`github.com/nrdcg/namesilo`) covers the operations but is
-generated from 2019 documentation and returns raw responses in errors; this
-provider owns its small client instead, for control over diagnostics and API-key
-redaction.
+`addPrivacy` and `removePrivacy`, so the provider manages that too. Contact
+profiles are the third piece of registrar state: ICANN requires a registrant,
+administrative, technical, and billing contact for every domain, the API manages
+profiles with `contactAdd`/`contactList`/`contactUpdate`/`contactDelete` and
+associates them with `contactDomainAssociate`, and there is no way to keep that
+in version control without a provider. An existing community Go client
+(`github.com/nrdcg/namesilo`) covers the operations but is generated from 2019
+documentation and returns raw responses in errors; this provider owns its small
+client instead, for control over diagnostics and API-key redaction.
 
 ```hcl
 resource "namesilo_nameservers" "example" {
@@ -37,6 +41,28 @@ resource "namesilo_dnssec_records" "example" {
     digest      = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   }]
 }
+
+resource "namesilo_contact" "registrant" {
+  first_name = "Ada"
+  last_name  = "Lovelace"
+  address    = "1 Analytical Engine Way"
+  city       = "London"
+  state      = "Greater London"
+  zip        = "EC1A 1BB"
+  country    = "GB"
+  email      = "ada@example.net"
+  phone      = "+44.2079460123"
+}
+
+resource "namesilo_domain_contacts" "example" {
+  domain    = "example.com"
+  registrant = namesilo_contact.registrant.id
+}
+
+resource "namesilo_privacy" "example" {
+  domain  = "example.com"
+  enabled = true
+}
 ```
 
 ## 2. Scope
@@ -45,9 +71,10 @@ resource "namesilo_dnssec_records" "example" {
 
 - The provider binary, its configuration, and an `internal/namesilo` HTTP client
   for the operations needed.
-- Three resources: `namesilo_nameservers`, `namesilo_dnssec_records`, and
-  `namesilo_privacy`.
-- Three data sources with the same names, for listing current state.
+- Five resources: `namesilo_nameservers`, `namesilo_dnssec_records`,
+  `namesilo_privacy`, `namesilo_contact`, and `namesilo_domain_contacts`.
+- Four data sources: `namesilo_nameservers`, `namesilo_dnssec_records`,
+  `namesilo_privacy`, and `namesilo_contacts`.
 - Import for every resource.
 - Unit tests, hermetic harness tests against a fake API server, and opt-in live
   acceptance tests.
@@ -58,7 +85,7 @@ resource "namesilo_dnssec_records" "example" {
 - Zone-level DNS records (A, AAAA, CNAME, MX, TXT, and NS records inside
   NameSilo's managed zone). Only registrar-level settings are managed. The
   client is structured so an operation can be added later without rework.
-- Domain registration, renewal, transfer, contacts, and locking.
+- Domain registration, renewal, transfer, and locking.
 - NameSilo's "registered nameservers" feature (`addRegisteredNameServer` and
   friends), which manages glue/child nameservers rather than delegation.
 - DNSSEC key management. The provider publishes DS records; it does not generate
@@ -106,6 +133,7 @@ terraform-provider-namesilo/
       domain.go                        # GetDomainInfo, ChangeNameServers
       dnssec.go                        # ListDSRecords, AddDSRecord, DeleteDSRecord
       privacy.go                       # AddPrivacy, RemovePrivacy
+      contact.go                       # ListContacts, AddContact, UpdateContact, DeleteContact, AssociateContacts
       normalize.go                     # NormalizeNameservers, SameNameservers, DiffDSRecords
       boundary_test.go                 # fails `go test` if a terraform-plugin-* import appears
       *_test.go
@@ -116,9 +144,12 @@ terraform-provider-namesilo/
       resource_nameservers.go          # namesilo_nameservers
       resource_dnssec_records.go       # namesilo_dnssec_records
       resource_privacy.go              # namesilo_privacy
+      resource_contact.go              # namesilo_contact
+      resource_domain_contacts.go      # namesilo_domain_contacts
       data_source_nameservers.go       # namesilo_nameservers
       data_source_dnssec_records.go    # namesilo_dnssec_records
       data_source_privacy.go           # namesilo_privacy
+      data_source_contacts.go          # namesilo_contacts
       provider_test.go                 # in-process protocol 6 factories, TestMain, shared guards
       fakeserver_test.go               # in-memory NameSilo API for harness tests
       *_test.go
@@ -127,18 +158,24 @@ terraform-provider-namesilo/
     resources/nameservers.md           # generated; tfplugindocs strips the provider prefix
     resources/dnssec_records.md        # generated
     resources/privacy.md               # generated
+    resources/contact.md               # generated
+    resources/domain_contacts.md       # generated
     data-sources/nameservers.md        # generated
     data-sources/dnssec_records.md     # generated
     data-sources/privacy.md            # generated
+    data-sources/contacts.md           # generated
     superpowers/specs/                 # this document (hand-written, never clobbered)
   examples/
     provider/provider.tf
     resources/namesilo_nameservers/{resource.tf,import.sh}
     resources/namesilo_dnssec_records/{resource.tf,import.sh}
     resources/namesilo_privacy/{resource.tf,import.sh}
+    resources/namesilo_contact/{resource.tf,import.sh}
+    resources/namesilo_domain_contacts/{resource.tf,import.sh}
     data-sources/namesilo_nameservers/data-source.tf
     data-sources/namesilo_dnssec_records/data-source.tf
     data-sources/namesilo_privacy/data-source.tf
+    data-sources/namesilo_contacts/data-source.tf
   templates/index.md.tmpl              # source for docs/index.md
   tools/                               # separate Go module: tfplugindocs only
   GNUmakefile
@@ -171,7 +208,15 @@ is a thin translation between `types.*` values and those functions.
 - **One resource per domain.** `domain` forces replacement; changing it points
   the resource at a different domain rather than renaming anything.
 - **`id` is the domain.** It is inert (Terraform keys state by resource
-  address), it makes `tofu state show` readable, and it is the import ID.
+  address), it makes `tofu state show` readable, and it is the import ID. The
+  one exception is `namesilo_contact`, whose `id` is the API's `contact_id`.
+- **A contact profile** is an account-level record identified by `contact_id`. A
+  domain references profiles by ID in four roles: registrant, administrative,
+  technical, and billing. Contact profiles are not owned by a domain, so the
+  profile resource and the association resource are separate.
+- **`default_profile`** is an account-level flag on one profile (`1` or `0` in
+  the API); it cannot be set or deleted through these operations, so it is
+  computed and informational.
 
 Invariants that harness and acceptance tests assert:
 
@@ -194,6 +239,17 @@ Invariants that harness and acceptance tests assert:
 7. Destroying `namesilo_privacy` calls `removePrivacy` only when privacy was
    enabled; destroying a resource that declared `enabled = false` makes no API
    call.
+8. A contact profile round-trips: Create writes `contact_id` to `id`, Read
+   returns the same field values, and a second plan is empty, including for
+   fields the API returns as empty elements.
+9. `namesilo_domain_contacts` updates only the roles present in configuration;
+   a role that is omitted is reported by the API and stored as computed without
+   appearing as drift.
+10. Destroying `namesilo_domain_contacts` leaves the domain's associations in
+    place: the API has no disassociate operation, so there is nothing to undo.
+11. Destroying `namesilo_contact` deletes the profile, and a profile still
+    associated with a domain fails with the API's error rather than silently
+    remaining.
 
 ## 5. Provider configuration
 
@@ -337,13 +393,119 @@ Markdown description must state that privacy can be unavailable or billable for
 some TLDs (the API error is surfaced unchanged), and that a private WHOIS hides
 registrant contact data.
 
-### 6.4 ModifyPlan and drift
+### 6.4 `namesilo_contact`
 
-`namesilo_nameservers` and `namesilo_dnssec_records` use `ModifyPlan` only to
-normalize configured values to the shape Read writes: lowercase for nameserver
-names and digests. Nothing else is computed in `ModifyPlan`; `id` uses
-`UseStateForUnknown`, and no attribute is `Computed` other than `id`.
-`namesilo_privacy` needs no plan modifier at all: a boolean has nothing to
+A contact profile is an account-level object: create makes a new one on every
+apply that starts from a create, and there is no name-based adoption, so import
+by `contact_id` is the only way to take over an existing profile.
+
+| Attribute | Type | Required/Optional/Computed | API field | Notes |
+| --- | --- | --- | --- | --- |
+| `first_name` | `string` | Required, Sensitive | `fn` | `LengthAtLeast(1)` |
+| `last_name` | `string` | Required, Sensitive | `ln` | `LengthAtLeast(1)` |
+| `address` | `string` | Required, Sensitive | `ad` | `LengthAtLeast(1)` |
+| `address2` | `string` | Optional, Sensitive | `ad2` | `LengthAtMost(128)` |
+| `city` | `string` | Required, Sensitive | `cy` | `LengthAtLeast(1)` |
+| `state` | `string` | Required, Sensitive | `st` | `LengthAtLeast(1)` |
+| `zip` | `string` | Required, Sensitive | `zp` | `LengthAtLeast(1)` |
+| `country` | `string` | Required, Sensitive | `ct` | `LengthBetween(2, 2)`, uppercased |
+| `email` | `string` | Required, Sensitive | `em` | `LengthAtLeast(1)` |
+| `phone` | `string` | Required, Sensitive | `ph` | `LengthAtLeast(1)` |
+| `fax` | `string` | Optional, Sensitive | `fx` | `LengthAtMost(32)` |
+| `company` | `string` | Optional, Sensitive | `cp` | `LengthAtMost(64)` |
+| `nickname` | `string` | Optional, Sensitive | `nn` | `LengthAtMost(24)` |
+| `us_nexus_category` | `string` | Optional, Sensitive | `usnc` | `LengthAtMost(3)` |
+| `us_application_purpose` | `string` | Optional, Sensitive | `usap` | `LengthAtMost(2)` |
+| `ca_legal_form` | `string` | Optional, Sensitive | `calf` | CIRA |
+| `ca_language` | `string` | Optional, Sensitive | `caln` | CIRA |
+| `ca_agreement_version` | `string` | Optional, Sensitive | `caag` | CIRA |
+| `ca_whois_display` | `string` | Optional, Sensitive | `cawd` | CIRA |
+| `eu_citizenship_country` | `string` | Optional, Sensitive | `eucs` | `.eu` |
+| `default_profile` | `bool` | Computed | `default_profile` | `1` is the account default |
+| `id` | `string` | Computed | `contact_id` | `UseStateForUnknown` |
+
+**PII policy (GDPR).** Every attribute that describes the contact person is
+marked `Sensitive`: names, addresses, city, state, zip, country, email, phone,
+fax, company, nickname, and the TLD-specific attestations. That matches GDPR
+Article 4(1), where information relating to an identifiable natural person
+includes names, location data, and online identifiers. Excluded from masking,
+with reasons: `id`/`contact_id` is an opaque account-scoped identifier that is
+needed as a plain reference and as the import value, `domain` does not exist on
+this resource, and `default_profile` is account metadata rather than personal
+data. `Sensitive` masks CLI output only; state still contains the data, which
+the documentation states plainly, and practitioners are told they can add
+`sensitive = true` to their own contact input variables for stronger masking.
+
+**ModifyPlan:** optional fields whose planned value is `""` are normalized to
+null, because the API returns unset fields as empty elements and Read writes
+null. Required fields cannot be empty (validators), so nothing there needs
+normalizing. `country` is uppercased to match the API.
+
+**Create:** `AddContact(contact)` returns the new `contact_id`, which becomes
+`id`. State echoes the configured fields, and `default_profile` is written as
+`false`; the refresh that follows the apply corrects it, and because the
+attribute is computed, that correction produces no plan diff. A second API call
+in Create was rejected: if it failed after a successful add, the profile would
+be orphaned with no ID in state.
+
+**Update:** `UpdateContact(contact)` with `id` from state, then state is the
+plan with `default_profile` carried over. `contactUpdate` takes the same fields
+as `contactAdd`, so every managed field is sent on every update.
+
+**Read:** `ListContacts(id)`. Exactly one profile is expected. Zero profiles
+means the profile no longer exists, so the resource is removed from state with a
+warning rather than left to fail every future plan; a profile absent from the
+account is unambiguous, unlike a domain (see §11). API errors are diagnostics.
+
+**Delete:** `DeleteContact(id)`. The API refuses to delete a profile still
+associated with a domain, and the error is surfaced unchanged: the fix is to
+reassign the domain's contacts first, which is what the dependency graph
+expresses when `namesilo_domain_contacts` references this resource.
+
+### 6.5 `namesilo_domain_contacts`
+
+| Attribute | Type | Required/Optional/Computed | Notes |
+| --- | --- | --- | --- |
+| `domain` | `string` | Required | `stringplanmodifier.RequiresReplace()` |
+| `registrant` | `string` | Optional, Computed | `UseStateForUnknown` |
+| `administrative` | `string` | Optional, Computed | `UseStateForUnknown` |
+| `technical` | `string` | Optional, Computed | `UseStateForUnknown` |
+| `billing` | `string` | Optional, Computed | `UseStateForUnknown` |
+| `id` | `string` | Computed | domain value, `UseStateForUnknown` |
+
+Partial management is deliberate: a role that is omitted from configuration is
+left alone, and the API's current value is stored as computed. Removing a role
+from configuration stops managing it; it does not reassign the domain.
+
+**Create/Update:** the set of roles to send is decided from `req.Config` (which
+is null for omitted roles), and the values come from `req.Plan` (which is
+unknown for omitted roles because they are `Computed`). Those roles are sent in
+one `contactDomainAssociate` call. A following Read populates the computed
+roles so state is complete and the plan is quiet.
+
+**Read:** `GetDomainInfo(domain)` → `contact_ids` → all four roles.
+
+**Delete:** a no-op. The API has no disassociate operation and a domain must
+have all four roles, so destroying the resource stops managing the association
+and leaves it intact. The description says this.
+
+**Import:** by domain; `Read` fills all four roles.
+
+Changing the registrant contact can trigger a registry contact-verification
+email and, for some TLDs, is restricted; the API error is surfaced unchanged.
+The resource description says so.
+
+### 6.6 ModifyPlan and drift
+
+`namesilo_nameservers`, `namesilo_dnssec_records`, and `namesilo_contact` use
+`ModifyPlan` only to normalize configured values to the shape Read writes:
+lowercase for nameserver names and digests, empty-to-null for optional contact
+fields, and an uppercased country code. Nothing else is computed in `ModifyPlan`
+beyond `namesilo_contact`'s `default_profile`, which is set in Create as
+described in §6.4; `id` uses `UseStateForUnknown`, and no attribute is
+`Computed` other than `id`, `default_profile`, and the four optional roles of
+`namesilo_domain_contacts`. `namesilo_privacy` and `namesilo_domain_contacts`
+need no plan modifier: a boolean and opaque contact IDs have nothing to
 normalize.
 
 Normalization at plan time is what keeps a lowercase-only API from producing a
@@ -361,16 +523,24 @@ apply resolves it.
 | `namesilo_nameservers` | `domain` | `nameservers` — `list(string)`, lowercased, in the API's position order |
 | `namesilo_dnssec_records` | `domain` | `records` — `set(object)`, the same four fields as the resource |
 | `namesilo_privacy` | `domain` | `enabled` — `bool` |
+| `namesilo_contacts` | none | `contacts` — `set(object)`: `contact_id`, `default_profile`, and every profile field |
 
 The data sources exist for the "list" half of the request: reading current
-delegation, DS records, and privacy without managing them, for outputs,
-comparisons, or drift detection in a plan. Each has its own `Read` that calls
-the same client operations as the resources and writes normalized values. Their
-schemas carry `id = domain` for consistency with the resources.
+delegation, DS records, privacy, and contact profiles without managing them, for
+outputs, comparisons, or drift detection in a plan. Each has its own `Read` that
+calls the same client operations as the resources and writes normalized values.
+The three domain-scoped schemas carry `id = domain`; `namesilo_contacts` has the
+fixed `id` `contacts`, because it is account-scoped.
 
 A data source whose `domain` is not in the account fails with the API error
 rather than returning an empty result: an empty result would be indistinguishable
 from a name typo.
+
+`namesilo_contacts` returns full profiles, including the PII fields, because the
+resource and the data source are the only way to read account contacts; the
+same GDPR-driven `Sensitive` markings as §6.4 apply to the nested attributes.
+An account with no contacts (never seen in practice; every account has at least
+one default profile) returns an empty set rather than an error.
 
 ## 8. NameSilo API client
 
@@ -446,12 +616,54 @@ func (c *Client) AddDSRecord(ctx context.Context, domain string, record DSRecord
 func (c *Client) DeleteDSRecord(ctx context.Context, domain string, record DSRecord) error
 func (c *Client) AddPrivacy(ctx context.Context, domain string) error
 func (c *Client) RemovePrivacy(ctx context.Context, domain string) error
+func (c *Client) ListContacts(ctx context.Context, contactID string) ([]Contact, error)
+func (c *Client) AddContact(ctx context.Context, contact Contact) (string, error)
+func (c *Client) UpdateContact(ctx context.Context, contact Contact) error
+func (c *Client) DeleteContact(ctx context.Context, contactID string) error
+func (c *Client) AssociateContacts(ctx context.Context, domain string, roles ContactRoles) error
 ```
 
 ```go
 type DomainInfo struct {
     Nameservers []string
     Private     bool
+    Contacts    ContactRoles
+}
+
+// ContactRoles is a set of associations. An empty field means "not managed",
+// not "clear this role"; the API has no way to clear a role.
+type ContactRoles struct {
+    Registrant     string
+    Administrative string
+    Technical      string
+    Billing        string
+}
+
+// Contact mirrors the API's contact payload. Fields the API returns as empty
+// elements stay empty strings; the provider layer maps them to null.
+type Contact struct {
+    ID             string
+    DefaultProfile bool
+    Nickname       string // nn
+    Company        string // cp
+    FirstName      string // fn
+    LastName       string // ln
+    Address        string // ad
+    Address2       string // ad2
+    City           string // cy
+    State          string // st
+    Zip            string // zp
+    Country        string // ct
+    Email          string // em
+    Phone          string // ph
+    Fax            string // fx
+    UsNexusCategory       string // usnc
+    UsApplicationPurpose  string // usap
+    CaLegalForm           string // calf
+    CaLanguage            string // caln
+    CaAgreementVersion    string // caag
+    CaWhoisDisplay        string // cawd
+    EuCitizenshipCountry  string // eucs
 }
 
 type DSRecord struct {
@@ -466,10 +678,22 @@ Field mapping: `dnsSecAddRecord` and `dnsSecDeleteRecord` take `domain`,
 `digest`, `keyTag`, `digestType`, and `alg`; `dnsSecListRecords` returns
 `ds_record` elements with `digest`, `digest_type`, `algorithm`, and `key_tag`.
 `getDomainInfo` returns `nameservers > nameserver` elements whose text is the
-name and whose `position` attribute is an index, plus a `private` element whose
-value is `Yes` or `No`. `changeNameServers` takes `domain` plus `ns1`–`ns13`, of
-which the first two are required. `addPrivacy` and `removePrivacy` take only
-`domain`.
+name and whose `position` attribute is an index, a `private` element whose value
+is `Yes` or `No`, and a `contact_ids` element with `registrant`,
+`administrative`, `technical`, and `billing` children. `changeNameServers` takes
+`domain` plus `ns1`–`ns13`, of which the first two are required. `addPrivacy`
+and `removePrivacy` take only `domain`.
+
+`contactAdd` takes the required fields `fn`, `ln`, `ad`, `cy`, `st`, `zp`,
+`ct`, `em`, `ph` and the optional fields `nn`, `cp`, `ad2`, `fx`, `usnc`,
+`usap`, `calf`, `caln`, `caag`, `cawd`, `eucs`, and returns `contact_id` in the
+reply. `contactUpdate` takes the same fields plus `contact_id`. `contactDelete`
+takes only `contact_id`. `contactList` takes an optional `contact_id`; with it,
+the reply contains that profile (or none); without it, every profile. Each
+profile is a `contact` element with `contact_id`, `default_profile` (`1`/`0`),
+and the fields above. `contactDomainAssociate` takes `domain` and any subset of
+`registrant`, `administrative`, `billing`, and `technical`, each a
+`contact_id`; `AssociateContacts` sends only the non-empty roles.
 
 ### 8.4 Parsing quirks and error handling
 
@@ -485,6 +709,13 @@ each of which gets a fixture:
 - `private` is `Yes` or `No`, matched case-insensitively. Any other value is an
   error rather than a default: guessing would silently flip a domain's WHOIS
   exposure.
+- Unset contact fields come back as empty elements (`<address2/>`), so the
+  client normalizes the whole element set to empty strings and the provider
+  layer maps those to null. A single `contact` element in a `contactList`
+  reply is a one-element result, not a scalar.
+- `default_profile` is `1` or `0`; any other value is an error.
+- The fixtures use the shape NameSilo's own `contactList` replies have, which is
+  the same shape the official WHMCS module parses.
 - Unknown elements are ignored (`encoding/xml` does that by default); a reply
   missing `<code>` entirely is an error, not a success.
 - A non-200 HTTP status, a non-XML body, or a truncated body each produce an
@@ -537,30 +768,37 @@ to call Update.
 ## 10. Resource identity, import, and drift
 
 - `id` is the domain, set by Create and by `ImportState`, and preserved by
-  `UseStateForUnknown` on update.
+  `UseStateForUnknown` on update. `namesilo_contact` is the exception: its `id`
+  is the API's `contact_id`.
 - Import is `tofu import namesilo_nameservers.example example.com` and the same
-  form for `namesilo_dnssec_records` and `namesilo_privacy`. `ImportState` sets
-  `domain` from the ID and leaves everything else to `Read`, so an imported
-  resource converges on the domain's real state without a config-specific seed
-  (unlike the accumulator, which had no external system to read).
+  form for `namesilo_dnssec_records`, `namesilo_privacy`, and
+  `namesilo_domain_contacts`. `namesilo_contact` imports by `contact_id`.
+  `ImportState` sets `domain` or `id` from the import ID and leaves everything
+  else to `Read`, so an imported resource converges on the real state without a
+  config-specific seed (unlike the accumulator, which had no external system to
+  read).
 - Importing a domain with no DS records produces an empty set, which is a valid
   configuration (`records = []`) and therefore an empty plan once the config
   matches.
 - Drift detection is the normal refresh: a nameserver change made in the web UI
   shows as an update, a DS record removed outside Terraform is re-added, a DS
-  record added outside Terraform is removed, and a privacy toggle made in the
-  web UI shows as an update in the opposite direction.
+  record added outside Terraform is removed, a privacy toggle made in the web UI
+  shows as an update in the opposite direction, a contact profile edited in the
+  web UI shows as an update, and a role reassigned in the web UI shows as an
+  update when that role is configured.
 
 ## 11. Error handling and diagnostics
 
 - Client errors become `AddError` diagnostics titled with the operation, e.g.
   `NameSilo API error (namesilo_nameservers)`. The detail is the API detail text
   plus the code.
-- Read never removes a resource from state on an API error. NameSilo's code 200
-  conflates "expired", "inactive", and "not yours", so treating it as "gone"
+- Read does not remove a resource from state on an API error. NameSilo's code
+  200 conflates "expired", "inactive", and "not yours", so treating it as "gone"
   would silently drop a domain that is merely expired. `tofu state rm` remains
   the escape hatch for a domain that was transferred away. This is a documented
-  limitation (§17).
+  limitation (§17). The one exception is `namesilo_contact`: a successful
+  `contactList` filtered by ID that returns no profiles is not an API error, and
+  it removes the resource from state with a warning (§6.4).
 - A `500` or a network failure during Read is a diagnostic and leaves state
   untouched, so a transient outage cannot corrupt state.
 - Conversion failures (`ElementsAs`, `SetValueFrom`) produce `AddError`
@@ -587,20 +825,28 @@ Three tiers, each hermetic or opt-in; `make test` runs the first two.
   classification for 255 and 256, which are success for privacy operations and
   errors for every other operation. `private` parsing accepts `Yes`/`No` in any
   case and errors on anything else.
+- Contacts: `contactAdd`/`contactUpdate`/`contactDelete` request shapes,
+  `contactList` with and without a `contact_id`, fixtures with two profiles,
+  one profile, and zero profiles, empty elements normalizing to empty strings,
+  `default_profile` `1`/`0` parsing (and an error case), and
+  `contactDomainAssociate` sending only the non-empty roles.
 - Boundary test: `internal/namesilo` imports no `terraform-plugin-*` or
   `github.com/opentofu/*` package, mirroring the sibling providers.
 - Provider guards: `TestProviderSchema` validates the whole schema through
   `GetProviderSchema` on the in-process protocol 6 server (no `TF_ACC`, no CLI),
   `TestEveryGoFileHasTheSPDXHeader`, and the em-dash house-style test, all
-  adapted from the accumulator.
+  adapted from the accumulator. A schema test also walks the contact resource
+  and data source and asserts every PII attribute is marked `Sensitive` and
+  `id`/`default_profile` are not, so the GDPR mapping cannot drift silently.
 
 ### 12.2 Harness tests (`internal/provider`, hermetic, need `tofu`)
 
 `resource.Test` with `IsUnitTest: true` and the in-process
 `ProtoV6ProviderFactories`, pointed at a fake NameSilo API
-(`fakeserver_test.go`: `httptest.Server` plus an in-memory domain map, request
-log, and injectable failures). These exercise real Create/Read/Update/Delete and
-import through the framework without credentials or network access.
+(`fakeserver_test.go`: `httptest.Server` plus in-memory domain and contact maps,
+association state, a request log, and injectable failures). These exercise real
+Create/Read/Update/Delete and import through the framework without credentials
+or network access.
 
 `TestMain` resolves `tofu` once and records whether it was found: it sets
 `TF_ACC_TERRAFORM_PATH` when the variable is unset and `tofu` is on `PATH`, and
@@ -627,8 +873,19 @@ Cases:
 | privacy toggle | Each direction change issues exactly one call |
 | privacy drift | Flipping the fake's `private` out of band plans an update in the opposite direction |
 | privacy destroy | Destroy calls `removePrivacy` when enabled, and makes no call when disabled |
-| import all three | Import by domain yields state that matches the fake and plans empty |
-| data sources | All three return normalized values that match the fake |
+| contact create | `contactAdd` records every configured field and the returned `contact_id` becomes `id` |
+| contact update | Changing a field issues one `contactUpdate` and the plan is quiet afterwards |
+| contact empty optional | Omitted optional fields come back from the fake as empty elements and plan quietly |
+| contact drift | Editing the fake profile out of band plans an update |
+| contact gone | A profile the fake no longer has is removed from state with a warning |
+| contact destroy | Destroy calls `contactDelete` |
+| contacts data source | Returns every profile from the fake, including a profile with empty optional fields |
+| association partial | Only configured roles are sent; omitted roles are stored as computed |
+| association update | Changing one role sends one call with that role and leaves the rest |
+| association drift | Reassigning a role in the fake plans an update for that role only |
+| association destroy | Destroy makes no API call and leaves the fake's associations intact |
+| import all five | Import yields state that matches the fake and plans empty |
+| data sources | All four return normalized values that match the fake |
 
 ### 12.3 Live acceptance tests (`internal/provider`, opt-in)
 
@@ -636,21 +893,26 @@ Cases:
 `NAMESILO_API_KEY`, `NAMESILO_TEST_DOMAIN`, `TF_ACC_TERRAFORM_PATH`, and
 `TF_ACC_PROVIDER_HOST`. Missing credentials skip with an actionable message; a
 missing `TF_ACC` skips as usual. DS mutation tests additionally require
-`NAMESILO_TEST_DNSSEC=1`, and privacy mutation tests require
+`NAMESILO_TEST_DNSSEC=1`, privacy mutation tests require
 `NAMESILO_TEST_PRIVACY=1`, because privacy is unavailable for some TLDs and
-toggles WHOIS exposure.
+toggles WHOIS exposure, contact mutation tests require `NAMESILO_TEST_CONTACT=1`
+because they add and delete profiles in a live account, and association tests
+require `NAMESILO_TEST_DOMAIN_CONTACTS=1` because changing a domain's registrant
+can trigger registry verification and, for some TLDs, is restricted.
 
 `NAMESILO_TEST_DOMAIN` must be a **disposable domain** in the account: the
 nameserver tests repoint its delegation (to `ns1.example.net`/`ns2.example.net`
 and back to the dnsowl defaults on destroy), the DS tests publish and delete a
 synthetic DS record, which makes the domain fail DNSSEC validation while it
-exists, and the privacy tests toggle WHOIS privacy.
+exists, the privacy tests toggle WHOIS privacy, and the association tests
+repoint a role at a throwaway profile.
 
-Cases: read all three data sources; create/read/update/destroy the nameservers
-resource and assert quiet plans; import all three resources; add, roll, and
-remove a DS record; enable, disable, and re-enable privacy. Nothing in CI
-requires these; they are the contract check that the XML fixtures match the real
-API, and they run with `make testacc-live`.
+Cases: read all four data sources; create/read/update/destroy the nameservers
+resource and assert quiet plans; import every resource; add, roll, and remove a
+DS record; enable, disable, and re-enable privacy; create, update, and delete a
+contact profile; reassign a domain role and assert the other roles are
+untouched. Nothing in CI requires these; they are the contract check that the
+XML fixtures match the real API, and they run with `make testacc-live`.
 
 ## 13. Documentation
 
@@ -759,6 +1021,30 @@ OpenTofu instead.
   "already not private". Treating them as errors, as the community Go client
   does, would make a converging apply fail. The classification is scoped to the
   privacy operations so a 255/256 from another operation is still an error.
+- **Contact profiles and contact associations are separate resources.** A
+  profile is account-scoped and can be referenced by many domains; an
+  association is domain-scoped. Merging them would recreate the profile on
+  every association change and make a profile shared between domains
+  impossible.
+- **Association roles are optional and partially managed.** A role that is
+  omitted from configuration is left alone and stored as computed. Requiring
+  all four would force every configuration to carry IDs it does not manage, and
+  an update could not distinguish "set this role" from "I copied the current
+  value".
+- **Association destroy is a no-op.** The API has no disassociate operation and
+  a domain cannot have a missing role, so there is nothing to restore. The
+  resource description says so; the alternative, erroring on destroy, would make
+  `tofu destroy` fail on a resource the user is trying to stop managing.
+- **Contact profiles are deleted from state when they disappear.** Zero results
+  from a `contactList` filtered by ID is unambiguous: the profile is gone.
+  This is the opposite of the domain case (§11), where the API's "not active or
+  not yours" reply cannot be told apart from an expired but still-owned domain.
+- **PII masking is static, and write-only attributes are rejected.** The
+  framework cannot set `Sensitive` conditionally, and write-only attributes
+  would remove the drift detection that is the point of the resource, need a
+  companion version attribute, and are only supported by OpenTofu from 1.11.
+  The resource descriptions point practitioners at `sensitive = true` on their
+  own input variables for stronger masking.
 - **No provider-defined functions or ephemeral resources.** Nothing in the
   scope needs either.
 
@@ -780,5 +1066,17 @@ OpenTofu instead.
 - WHOIS privacy is not available for every TLD, and NameSilo may charge for it
   on some; the API's error is surfaced unchanged and the resource's description
   says so. The provider cannot pre-check support for a TLD.
+- `contactDelete` refuses a profile that is still associated with a domain, and
+  the account's default profile cannot be deleted. The API error is surfaced;
+  the fix is to reassign the domain first, which the dependency graph expresses.
+- Changing a domain's registrant contact can trigger an ICANN
+  registrant-verification email, and an unverified registrant can have domains
+  suspended. The provider does not manage verification.
+- Contact profiles are stored in state as plaintext. The `Sensitive` markings
+  mask CLI output only; they do not encrypt or redact state. Treat the state
+  file as personal data.
+- `contactList` is called once with no offset. If NameSilo returns a partial
+  list for a large account, the data source surfaces exactly what the API
+  returned.
 - The sandbox environment requires credentials from NameSilo support; the
   `endpoint` attribute makes it usable, but CI cannot exercise it.
