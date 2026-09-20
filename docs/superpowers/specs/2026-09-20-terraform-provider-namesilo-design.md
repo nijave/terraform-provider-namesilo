@@ -13,10 +13,13 @@ Kubernetes operator) needs to point the domain at those servers and publish a DS
 record for each signing key, and neither belongs in the zone itself.
 
 The NameSilo web UI can do both, and the NameSilo API exposes both, but the API
-has no Terraform provider. An existing community Go client
-(`github.com/nrdcg/namesilo`) covers the operations but is generated from 2019
-documentation and returns raw responses in errors; this provider owns its small
-client instead, for control over diagnostics and API-key redaction.
+has no Terraform provider. The same gap exists for WHOIS privacy: whether
+PrivacyGuardian is on is registrar state, and the API can toggle it with
+`addPrivacy` and `removePrivacy`, so the provider manages that too. An existing
+community Go client (`github.com/nrdcg/namesilo`) covers the operations but is
+generated from 2019 documentation and returns raw responses in errors; this
+provider owns its small client instead, for control over diagnostics and API-key
+redaction.
 
 ```hcl
 resource "namesilo_nameservers" "example" {
@@ -41,10 +44,11 @@ resource "namesilo_dnssec_records" "example" {
 **In scope:**
 
 - The provider binary, its configuration, and an `internal/namesilo` HTTP client
-  for the five API operations needed.
-- Two resources: `namesilo_nameservers` and `namesilo_dnssec_records`.
-- Two data sources with the same names, for listing current state.
-- Import for both resources.
+  for the operations needed.
+- Three resources: `namesilo_nameservers`, `namesilo_dnssec_records`, and
+  `namesilo_privacy`.
+- Three data sources with the same names, for listing current state.
+- Import for every resource.
 - Unit tests, hermetic harness tests against a fake API server, and opt-in live
   acceptance tests.
 - Generated documentation, build, CI, and release pipeline.
@@ -54,7 +58,7 @@ resource "namesilo_dnssec_records" "example" {
 - Zone-level DNS records (A, AAAA, CNAME, MX, TXT, and NS records inside
   NameSilo's managed zone). Only registrar-level settings are managed. The
   client is structured so an operation can be added later without rework.
-- Domain registration, renewal, transfer, contacts, privacy, and locking.
+- Domain registration, renewal, transfer, contacts, and locking.
 - NameSilo's "registered nameservers" feature (`addRegisteredNameServer` and
   friends), which manages glue/child nameservers rather than delegation.
 - DNSSEC key management. The provider publishes DS records; it does not generate
@@ -101,6 +105,7 @@ terraform-provider-namesilo/
       errors.go                        # APIError, reply-code classification
       domain.go                        # GetDomainInfo, ChangeNameServers
       dnssec.go                        # ListDSRecords, AddDSRecord, DeleteDSRecord
+      privacy.go                       # AddPrivacy, RemovePrivacy
       normalize.go                     # NormalizeNameservers, SameNameservers, DiffDSRecords
       boundary_test.go                 # fails `go test` if a terraform-plugin-* import appears
       *_test.go
@@ -110,8 +115,10 @@ terraform-provider-namesilo/
       model.go                         # types.Set/types.List <-> client types
       resource_nameservers.go          # namesilo_nameservers
       resource_dnssec_records.go       # namesilo_dnssec_records
+      resource_privacy.go              # namesilo_privacy
       data_source_nameservers.go       # namesilo_nameservers
       data_source_dnssec_records.go    # namesilo_dnssec_records
+      data_source_privacy.go           # namesilo_privacy
       provider_test.go                 # in-process protocol 6 factories, TestMain, shared guards
       fakeserver_test.go               # in-memory NameSilo API for harness tests
       *_test.go
@@ -119,15 +126,19 @@ terraform-provider-namesilo/
     index.md                           # generated
     resources/nameservers.md           # generated; tfplugindocs strips the provider prefix
     resources/dnssec_records.md        # generated
+    resources/privacy.md               # generated
     data-sources/nameservers.md        # generated
     data-sources/dnssec_records.md     # generated
+    data-sources/privacy.md            # generated
     superpowers/specs/                 # this document (hand-written, never clobbered)
   examples/
     provider/provider.tf
     resources/namesilo_nameservers/{resource.tf,import.sh}
     resources/namesilo_dnssec_records/{resource.tf,import.sh}
+    resources/namesilo_privacy/{resource.tf,import.sh}
     data-sources/namesilo_nameservers/data-source.tf
     data-sources/namesilo_dnssec_records/data-source.tf
+    data-sources/namesilo_privacy/data-source.tf
   templates/index.md.tmpl              # source for docs/index.md
   tools/                               # separate Go module: tfplugindocs only
   GNUmakefile
@@ -152,6 +163,11 @@ is a thin translation between `types.*` values and those functions.
 - **A DS record** is a tuple `(key_tag, algorithm, digest_type, digest)`. It is
   the API's own key for add and delete. Records are case-insensitive: digests
   are hex and nameservers are DNS names, so both are normalized to lowercase.
+- **WHOIS privacy** is a boolean on the domain. The API reports it as
+  `getDomainInfo`'s `private` field and toggles it with `addPrivacy` and
+  `removePrivacy`. Both operations are idempotent from the provider's point of
+  view: the reply codes for "already private" and "already not private" are
+  treated as success.
 - **One resource per domain.** `domain` forces replacement; changing it points
   the resource at a different domain rather than renaming anything.
 - **`id` is the domain.** It is inert (Terraform keys state by resource
@@ -172,6 +188,12 @@ Invariants that harness and acceptance tests assert:
    nameservers (`ns1.dnsowl.com`, `ns2.dnsowl.com`, `ns3.dnsowl.com`).
 5. Destroying `namesilo_dnssec_records` removes every managed DS record, which
    disables DNSSEC for the domain.
+6. `enabled = false` is a valid privacy configuration that issues no API call
+   when the domain is already not private, and `enabled = true` issues no call
+   when it is already private.
+7. Destroying `namesilo_privacy` calls `removePrivacy` only when privacy was
+   enabled; destroying a resource that declared `enabled = false` makes no API
+   call.
 
 ## 5. Provider configuration
 
@@ -283,12 +305,46 @@ no-op.
 
 **ModifyPlan:** when the planned `records` set is fully known, normalize it.
 
-### 6.3 ModifyPlan and drift
+### 6.3 `namesilo_privacy`
 
-Both resources use `ModifyPlan` only to normalize configured values to the shape
-Read writes: lowercase for nameserver names and digests. Nothing else is
-computed in `ModifyPlan`; `id` uses `UseStateForUnknown`, and no attribute is
-`Computed` other than `id`.
+| Attribute | Type | Required/Optional/Computed | Modifiers and validators |
+| --- | --- | --- | --- |
+| `domain` | `string` | Required | `stringplanmodifier.RequiresReplace()` |
+| `enabled` | `bool` | Required | none |
+| `id` | `string` | Computed | `stringplanmodifier.UseStateForUnknown()` |
+
+Resource existence does not imply privacy is on: `enabled` is the desired state,
+so `enabled = false` is how a domain is kept unprivate without deleting the
+resource. Drift detection is the normal refresh. If privacy is turned off in the
+web UI while `enabled = true`, Read writes `false` and the next plan turns it
+back on; if it is turned on while `enabled = false`, the next plan turns it off.
+
+**Create:** when `enabled` is true, `AddPrivacy(domain)`; when false, no API
+call and the state records `false`.
+
+**Update:** `AddPrivacy` or `RemovePrivacy` for the direction of the change.
+Both are called only when the plan and state disagree, and both tolerate the
+API's "already private" (255) and "already not private" (256) replies, so a race
+with the web UI cannot produce a spurious failure.
+
+**Read:** `GetDomainInfo(domain)`, parse `private`, write `enabled`.
+
+**Delete:** when state says enabled, `RemovePrivacy(domain)`; otherwise no API
+call. Removing the resource from configuration therefore disables privacy only
+if it was on.
+
+Markdown description must state that privacy can be unavailable or billable for
+some TLDs (the API error is surfaced unchanged), and that a private WHOIS hides
+registrant contact data.
+
+### 6.4 ModifyPlan and drift
+
+`namesilo_nameservers` and `namesilo_dnssec_records` use `ModifyPlan` only to
+normalize configured values to the shape Read writes: lowercase for nameserver
+names and digests. Nothing else is computed in `ModifyPlan`; `id` uses
+`UseStateForUnknown`, and no attribute is `Computed` other than `id`.
+`namesilo_privacy` needs no plan modifier at all: a boolean has nothing to
+normalize.
 
 Normalization at plan time is what keeps a lowercase-only API from producing a
 perpetual diff. The plan, the applied state, and the next plan's normalized
@@ -304,12 +360,13 @@ apply resolves it.
 | --- | --- | --- |
 | `namesilo_nameservers` | `domain` | `nameservers` — `list(string)`, lowercased, in the API's position order |
 | `namesilo_dnssec_records` | `domain` | `records` — `set(object)`, the same four fields as the resource |
+| `namesilo_privacy` | `domain` | `enabled` — `bool` |
 
 The data sources exist for the "list" half of the request: reading current
-delegation and DS records without managing them, for outputs, comparisons, or
-drift detection in a plan. Each has its own `Read` that calls the same client
-operations as the resources and writes normalized values. Their schemas carry
-`id = domain` for consistency with the resources.
+delegation, DS records, and privacy without managing them, for outputs,
+comparisons, or drift detection in a plan. Each has its own `Read` that calls
+the same client operations as the resources and writes normalized values. Their
+schemas carry `id = domain` for consistency with the resources.
 
 A data source whose `domain` is not in the account fails with the API error
 rather than returning an empty result: an empty result would be indistinguishable
@@ -317,7 +374,7 @@ from a name typo.
 
 ## 8. NameSilo API client
 
-`internal/namesilo` is a self-contained client for the five operations. It has
+`internal/namesilo` is a self-contained client for the operations above. It has
 no Terraform imports and no third-party dependencies beyond the standard
 library; the boundary test in the package enforces the first, the license audit
 in CI enforces the second.
@@ -353,9 +410,12 @@ The XML envelope is:
 </namesilo>
 ```
 
-Codes 300, 301, and 302 are success. Anything else is an `*APIError` carrying
-`Operation`, `Code`, and `Detail`. The relevant failure codes, from NameSilo's
-published list:
+Codes 300, 301, and 302 are success. Codes 255 ("Domain is already Private - No
+update made") and 256 ("Domain is already Not Private - No update made") are
+accepted as success by the privacy operations only: they mean the requested
+state already holds, and treating them as errors would make an idempotent apply
+fail. Anything else is an `*APIError` carrying `Operation`, `Code`, and `Detail`.
+The relevant failure codes, from NameSilo's published list:
 
 | Code | Meaning |
 | --- | --- |
@@ -384,11 +444,14 @@ func (c *Client) ChangeNameServers(ctx context.Context, domain string, nameserve
 func (c *Client) ListDSRecords(ctx context.Context, domain string) ([]DSRecord, error)
 func (c *Client) AddDSRecord(ctx context.Context, domain string, record DSRecord) error
 func (c *Client) DeleteDSRecord(ctx context.Context, domain string, record DSRecord) error
+func (c *Client) AddPrivacy(ctx context.Context, domain string) error
+func (c *Client) RemovePrivacy(ctx context.Context, domain string) error
 ```
 
 ```go
 type DomainInfo struct {
     Nameservers []string
+    Private     bool
 }
 
 type DSRecord struct {
@@ -403,8 +466,10 @@ Field mapping: `dnsSecAddRecord` and `dnsSecDeleteRecord` take `domain`,
 `digest`, `keyTag`, `digestType`, and `alg`; `dnsSecListRecords` returns
 `ds_record` elements with `digest`, `digest_type`, `algorithm`, and `key_tag`.
 `getDomainInfo` returns `nameservers > nameserver` elements whose text is the
-name and whose `position` attribute is an index. `changeNameServers` takes
-`domain` plus `ns1`–`ns13`, of which the first two are required.
+name and whose `position` attribute is an index, plus a `private` element whose
+value is `Yes` or `No`. `changeNameServers` takes `domain` plus `ns1`–`ns13`, of
+which the first two are required. `addPrivacy` and `removePrivacy` take only
+`domain`.
 
 ### 8.4 Parsing quirks and error handling
 
@@ -417,6 +482,9 @@ each of which gets a fixture:
   produced as an empty record.
 - Nameserver names come back uppercased with a trailing dot sometimes; digests
   come back uppercased.
+- `private` is `Yes` or `No`, matched case-insensitively. Any other value is an
+  error rather than a default: guessing would silently flip a domain's WHOIS
+  exposure.
 - Unknown elements are ignored (`encoding/xml` does that by default); a reply
   missing `<code>` entirely is an error, not a success.
 - A non-200 HTTP status, a non-XML body, or a truncated body each produce an
@@ -470,8 +538,8 @@ to call Update.
 
 - `id` is the domain, set by Create and by `ImportState`, and preserved by
   `UseStateForUnknown` on update.
-- Import is `tofu import namesilo_nameservers.example example.com` and
-  `tofu import namesilo_dnssec_records.example example.com`. `ImportState` sets
+- Import is `tofu import namesilo_nameservers.example example.com` and the same
+  form for `namesilo_dnssec_records` and `namesilo_privacy`. `ImportState` sets
   `domain` from the ID and leaves everything else to `Read`, so an imported
   resource converges on the domain's real state without a config-specific seed
   (unlike the accumulator, which had no external system to read).
@@ -479,8 +547,9 @@ to call Update.
   configuration (`records = []`) and therefore an empty plan once the config
   matches.
 - Drift detection is the normal refresh: a nameserver change made in the web UI
-  shows as an update, a DS record removed outside Terraform is re-added, and a
-  DS record added outside Terraform is removed.
+  shows as an update, a DS record removed outside Terraform is re-added, a DS
+  record added outside Terraform is removed, and a privacy toggle made in the
+  web UI shows as an update in the opposite direction.
 
 ## 11. Error handling and diagnostics
 
@@ -514,6 +583,10 @@ Three tiers, each hermetic or opt-in; `make test` runs the first two.
 - Pure helpers: `NormalizeNameserver(s)`, `SameNameservers`, `NormalizeDSRecord`,
   `DiffDSRecords` including empty inputs, adds and removes in one diff,
   case-only differences, and deterministic ordering.
+- Privacy: `addPrivacy`/`removePrivacy` request shapes, and reply-code
+  classification for 255 and 256, which are success for privacy operations and
+  errors for every other operation. `private` parsing accepts `Yes`/`No` in any
+  case and errors on anything else.
 - Boundary test: `internal/namesilo` imports no `terraform-plugin-*` or
   `github.com/opentofu/*` package, mirroring the sibling providers.
 - Provider guards: `TestProviderSchema` validates the whole schema through
@@ -549,8 +622,13 @@ Cases:
 | dnssec drift | A record deleted out of band plans a re-add; one added out of band plans a removal |
 | dnssec empty | `records = []` deletes every managed record and is quiet afterwards |
 | dnssec destroy | Destroy deletes every managed record |
-| import both | Import by domain yields state that matches the fake and plans empty |
-| data sources | Both return normalized values that match the fake |
+| privacy create enabled | The fake recorded one `addPrivacy` call |
+| privacy create disabled | No privacy call is made |
+| privacy toggle | Each direction change issues exactly one call |
+| privacy drift | Flipping the fake's `private` out of band plans an update in the opposite direction |
+| privacy destroy | Destroy calls `removePrivacy` when enabled, and makes no call when disabled |
+| import all three | Import by domain yields state that matches the fake and plans empty |
+| data sources | All three return normalized values that match the fake |
 
 ### 12.3 Live acceptance tests (`internal/provider`, opt-in)
 
@@ -558,18 +636,21 @@ Cases:
 `NAMESILO_API_KEY`, `NAMESILO_TEST_DOMAIN`, `TF_ACC_TERRAFORM_PATH`, and
 `TF_ACC_PROVIDER_HOST`. Missing credentials skip with an actionable message; a
 missing `TF_ACC` skips as usual. DS mutation tests additionally require
-`NAMESILO_TEST_DNSSEC=1`.
+`NAMESILO_TEST_DNSSEC=1`, and privacy mutation tests require
+`NAMESILO_TEST_PRIVACY=1`, because privacy is unavailable for some TLDs and
+toggles WHOIS exposure.
 
 `NAMESILO_TEST_DOMAIN` must be a **disposable domain** in the account: the
 nameserver tests repoint its delegation (to `ns1.example.net`/`ns2.example.net`
-and back to the dnsowl defaults on destroy), and the DS tests publish and
-delete a synthetic DS record, which makes the domain fail DNSSEC validation
-while it exists.
+and back to the dnsowl defaults on destroy), the DS tests publish and delete a
+synthetic DS record, which makes the domain fail DNSSEC validation while it
+exists, and the privacy tests toggle WHOIS privacy.
 
-Cases: read both data sources; create/read/update/destroy the nameservers
-resource and assert quiet plans; import both resources; add, roll, and remove a
-DS record. Nothing in CI requires these; they are the contract check that the
-XML fixtures match the real API, and they run with `make testacc-live`.
+Cases: read all three data sources; create/read/update/destroy the nameservers
+resource and assert quiet plans; import all three resources; add, roll, and
+remove a DS record; enable, disable, and re-enable privacy. Nothing in CI
+requires these; they are the contract check that the XML fixtures match the real
+API, and they run with `make testacc-live`.
 
 ## 13. Documentation
 
@@ -670,6 +751,14 @@ OpenTofu instead.
 - **No retries.** NameSilo's error codes do not distinguish "try again" from
   "your request is wrong" well enough to retry safely, and a provider apply is
   already a retry loop a human supervises. Code 400 is documented as re-run.
+- **Privacy is a boolean on a resource, not a presence-only resource.** Chosen
+  by the project owner. `enabled = false` lets configuration assert "this domain
+  must not use PrivacyGuardian", which a presence-only resource cannot express,
+  and it makes drift visible in both directions.
+- **Privacy's 255/256 replies are success.** They mean "already private" and
+  "already not private". Treating them as errors, as the community Go client
+  does, would make a converging apply fail. The classification is scoped to the
+  privacy operations so a 255/256 from another operation is still an error.
 - **No provider-defined functions or ephemeral resources.** Nothing in the
   scope needs either.
 
@@ -688,5 +777,8 @@ OpenTofu instead.
   removing itself from state; use `tofu state rm` if the domain is really gone.
 - The provider does not verify that a published DS record matches the zone's
   keys. A correct configuration of the wrong values still breaks validation.
+- WHOIS privacy is not available for every TLD, and NameSilo may charge for it
+  on some; the API's error is surfaced unchanged and the resource's description
+  says so. The provider cannot pre-check support for a TLD.
 - The sandbox environment requires credentials from NameSilo support; the
   `endpoint` attribute makes it usable, but CI cannot exercise it.
