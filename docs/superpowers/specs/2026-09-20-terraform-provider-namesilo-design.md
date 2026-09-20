@@ -668,12 +668,6 @@ same GDPR-driven `Sensitive` markings as §6.4 apply to the nested attributes.
 An account with no contacts (never seen in practice; every account has at least
 one default profile) returns an empty set rather than an error.
 
-`namesilo_contacts` returns full profiles, including the PII fields, because the
-resource and the data source are the only way to read account contacts; the
-same GDPR-driven `Sensitive` markings as §6.4 apply to the nested attributes.
-An account with no contacts (never seen in practice; every account has at least
-one default profile) returns an empty set rather than an error.
-
 ## 8. NameSilo API client
 
 `internal/namesilo` is a self-contained client for the operations above. It has
@@ -1008,6 +1002,13 @@ Three tiers, each hermetic or opt-in; `make test` runs the first two.
 - Pure helpers: `NormalizeNameserver(s)`, `SameNameservers`, `NormalizeDSRecord`,
   `DiffDSRecords` including empty inputs, adds and removes in one diff,
   case-only differences, and deterministic ordering.
+- DNSSEC request/response asymmetry: request construction asserts
+  `dnsSecAddRecord`/`dnsSecDeleteRecord` emit the abbreviated `alg` parameter
+  (not `algorithm`) alongside camelCase `keyTag` and `digestType`; response
+  parsing asserts `dnsSecListRecords` maps the full-word `<algorithm>` element
+  and snake_case `<key_tag>`/`<digest_type>`, and that an empty `<reply>` with
+  zero `<ds_record>` elements (what NameSilo returns for an unsigned domain)
+  unmarshals to an empty slice with no error.
 - Privacy and toggles: `addPrivacy`/`removePrivacy`, `domainLock`/
   `domainUnlock`, and `addAutoRenewal`/`removeAutoRenewal` request shapes, and
   reply-code classification for 250/251/252/253/255/256, which are success for
@@ -1060,10 +1061,11 @@ Cases:
 | dnssec update roll | A key roll adds the new record before deleting the old one (request order asserted) |
 | dnssec drift | A record deleted out of band plans a re-add; one added out of band plans a removal |
 | dnssec empty | `records = []` deletes every managed record and is quiet afterwards |
+| dnssec empty unsigned | An unsigned domain whose fake returns an empty `<reply>` (zero `<ds_record>` elements) parses as an empty set and plans cleanly with `records = []` |
 | dnssec destroy | Destroy deletes every managed record |
-| privacy create enabled | The fake recorded one `addPrivacy` call |
-| privacy create disabled | No privacy call is made |
-| privacy toggle | Each direction change issues exactly one call |
+| privacy create enabled | The fake recorded one `addPrivacy` call, and the call is idempotent against the fake's already-private reply (code 255) |
+| privacy create disabled | No privacy call is made, and the call is idempotent against the fake's already-not-private reply (code 256) |
+| privacy toggle | Each direction change issues exactly one call, and a toggle that lands on an already-in-state reply (255/256) is accepted as success |
 | privacy drift | Flipping the fake's `private` out of band plans an update in the opposite direction |
 | privacy destroy | Destroy calls `removePrivacy` when enabled, and makes no call when disabled |
 | lock create | The fake recorded `domainLock` or `domainUnlock` for the configured `locked` value, and each is idempotent against the fake's already-in-state reply |
