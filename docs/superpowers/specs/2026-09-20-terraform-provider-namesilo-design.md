@@ -20,10 +20,13 @@ profiles are the third piece of registrar state: ICANN requires a registrant,
 administrative, technical, and billing contact for every domain, the API manages
 profiles with `contactAdd`/`contactList`/`contactUpdate`/`contactDelete` and
 associates them with `contactDomainAssociate`, and there is no way to keep that
-in version control without a provider. An existing community Go client
-(`github.com/nrdcg/namesilo`) covers the operations but is generated from 2019
-documentation and returns raw responses in errors; this provider owns its small
-client instead, for control over diagnostics and API-key redaction.
+in version control without a provider. The registrar lock
+(`domainLock`/`domainUnlock`), the domain inventory (`listDomains`), and
+`getDomainInfo` cover the rest of what an operator audits. An existing
+community Go client (`github.com/nrdcg/namesilo`) covers the operations but is
+generated from 2019 documentation and returns raw responses in errors; this
+provider owns its small client instead, for control over diagnostics and API-key
+redaction.
 
 ```hcl
 resource "namesilo_nameservers" "example" {
@@ -63,6 +66,17 @@ resource "namesilo_privacy" "example" {
   domain  = "example.com"
   enabled = true
 }
+
+resource "namesilo_domain_lock" "example" {
+  domain = "example.com"
+  locked = true
+}
+
+data "namesilo_domains" "all" {}
+
+output "expiring_first" {
+  value = sort([for d in data.namesilo_domains.all.domains : "${d.expires} ${d.name}"])[0]
+}
 ```
 
 ## 2. Scope
@@ -71,10 +85,12 @@ resource "namesilo_privacy" "example" {
 
 - The provider binary, its configuration, and an `internal/namesilo` HTTP client
   for the operations needed.
-- Five resources: `namesilo_nameservers`, `namesilo_dnssec_records`,
-  `namesilo_privacy`, `namesilo_contact`, and `namesilo_domain_contacts`.
-- Four data sources: `namesilo_nameservers`, `namesilo_dnssec_records`,
-  `namesilo_privacy`, and `namesilo_contacts`.
+- Six resources: `namesilo_nameservers`, `namesilo_dnssec_records`,
+  `namesilo_privacy`, `namesilo_contact`, `namesilo_domain_contacts`, and
+  `namesilo_domain_lock`.
+- Six data sources: the same names for the per-domain settings and contacts,
+  plus `namesilo_domain` (one domain's `getDomainInfo` view) and
+  `namesilo_domains` (the account's domain inventory).
 - Import for every resource.
 - Unit tests, hermetic harness tests against a fake API server, and opt-in live
   acceptance tests.
@@ -85,7 +101,7 @@ resource "namesilo_privacy" "example" {
 - Zone-level DNS records (A, AAAA, CNAME, MX, TXT, and NS records inside
   NameSilo's managed zone). Only registrar-level settings are managed. The
   client is structured so an operation can be added later without rework.
-- Domain registration, renewal, transfer, and locking.
+- Domain registration, renewal, transfer, and auto-renewal.
 - NameSilo's "registered nameservers" feature (`addRegisteredNameServer` and
   friends), which manages glue/child nameservers rather than delegation.
 - DNSSEC key management. The provider publishes DS records; it does not generate
@@ -130,7 +146,7 @@ terraform-provider-namesilo/
     namesilo/                          # pure Go, zero Terraform imports
       client.go                        # Client, request building, XML envelope
       errors.go                        # APIError, reply-code classification
-      domain.go                        # GetDomainInfo, ChangeNameServers
+      domain.go                        # GetDomainInfo, ChangeNameServers, ListDomains, DomainLock, DomainUnlock
       dnssec.go                        # ListDSRecords, AddDSRecord, DeleteDSRecord
       privacy.go                       # AddPrivacy, RemovePrivacy
       contact.go                       # ListContacts, AddContact, UpdateContact, DeleteContact, AssociateContacts
@@ -146,10 +162,13 @@ terraform-provider-namesilo/
       resource_privacy.go              # namesilo_privacy
       resource_contact.go              # namesilo_contact
       resource_domain_contacts.go      # namesilo_domain_contacts
+      resource_domain_lock.go          # namesilo_domain_lock
       data_source_nameservers.go       # namesilo_nameservers
       data_source_dnssec_records.go    # namesilo_dnssec_records
       data_source_privacy.go           # namesilo_privacy
       data_source_contacts.go          # namesilo_contacts
+      data_source_domain.go            # namesilo_domain
+      data_source_domains.go           # namesilo_domains
       provider_test.go                 # in-process protocol 6 factories, TestMain, shared guards
       fakeserver_test.go               # in-memory NameSilo API for harness tests
       *_test.go
@@ -160,10 +179,13 @@ terraform-provider-namesilo/
     resources/privacy.md               # generated
     resources/contact.md               # generated
     resources/domain_contacts.md       # generated
+    resources/domain_lock.md           # generated
     data-sources/nameservers.md        # generated
     data-sources/dnssec_records.md     # generated
     data-sources/privacy.md            # generated
     data-sources/contacts.md           # generated
+    data-sources/domain.md             # generated
+    data-sources/domains.md            # generated
     superpowers/specs/                 # this document (hand-written, never clobbered)
   examples/
     provider/provider.tf
@@ -172,10 +194,13 @@ terraform-provider-namesilo/
     resources/namesilo_privacy/{resource.tf,import.sh}
     resources/namesilo_contact/{resource.tf,import.sh}
     resources/namesilo_domain_contacts/{resource.tf,import.sh}
+    resources/namesilo_domain_lock/{resource.tf,import.sh}
     data-sources/namesilo_nameservers/data-source.tf
     data-sources/namesilo_dnssec_records/data-source.tf
     data-sources/namesilo_privacy/data-source.tf
     data-sources/namesilo_contacts/data-source.tf
+    data-sources/namesilo_domain/data-source.tf
+    data-sources/namesilo_domains/data-source.tf
   templates/index.md.tmpl              # source for docs/index.md
   tools/                               # separate Go module: tfplugindocs only
   GNUmakefile
@@ -217,6 +242,13 @@ is a thin translation between `types.*` values and those functions.
 - **`default_profile`** is an account-level flag on one profile (`1` or `0` in
   the API); it cannot be set or deleted through these operations, so it is
   computed and informational.
+- **Registry lock** is a boolean on the domain. `getDomainInfo` reports it as
+  `locked` (`Yes`/`No`) and `domainLock`/`domainUnlock` toggle it. Like privacy,
+  the "already locked" (252) and "already unlocked" (253) replies mean the
+  desired state holds and are accepted as success for these two operations only.
+- **`getDomainInfo` is the shared read** for nameservers, privacy, contact
+  associations, and lock state. `namesilo_domain` exposes the whole reply;
+  `ListDomains` is the account inventory and returns only name and dates.
 
 Invariants that harness and acceptance tests assert:
 
@@ -250,6 +282,13 @@ Invariants that harness and acceptance tests assert:
 11. Destroying `namesilo_contact` deletes the profile, and a profile still
     associated with a domain fails with the API's error rather than silently
     remaining.
+12. `locked = false` is a valid lock configuration that issues `domainUnlock`
+    and tolerates code 253; destroying `namesilo_domain_lock` unlocks only when
+    the state says locked.
+13. `namesilo_domains` returns every domain the API reports for the account: the
+    client requests pages until it has `pager.total` domains, and an API that
+    ignores the paging parameters terminates after the first repeated page and
+    the data source warns that the list may be short.
 
 ## 5. Provider configuration
 
@@ -257,8 +296,9 @@ Invariants that harness and acceptance tests assert:
 | --- | --- | --- | --- |
 | `api_key` | `string` | Optional, Sensitive | Falls back to `NAMESILO_API_KEY`. Configure fails if the resolved value is empty. |
 | `endpoint` | `string` | Optional | Falls back to `NAMESILO_API_ENDPOINT`, then `https://www.namesilo.com/api`. Trailing slash is trimmed. Sandbox and OTE endpoints are accepted from NameSilo support. |
+| `page_size` | `int64` | Optional | Domain-inventory page size for `namesilo_domains`. Defaults to `100`; allowed values are the ones NameSilo's own UI offers: `20`, `50`, `100`, `200`, `500`. |
 
-`Configure` resolves both, constructs one `*namesilo.Client`, and passes it to
+`Configure` resolves these, constructs one `*namesilo.Client`, and passes it to
 resources and data sources through `resp.ResourceData` / `resp.DataSourceData`.
 A consumer that finds the wrong type adds an error diagnostic naming the type it
 got, the same guard the framework documentation recommends.
@@ -495,7 +535,34 @@ Changing the registrant contact can trigger a registry contact-verification
 email and, for some TLDs, is restricted; the API error is surfaced unchanged.
 The resource description says so.
 
-### 6.6 ModifyPlan and drift
+### 6.6 `namesilo_domain_lock`
+
+| Attribute | Type | Required/Optional/Computed | Modifiers and validators |
+| --- | --- | --- | --- |
+| `domain` | `string` | Required | `stringplanmodifier.RequiresReplace()` |
+| `locked` | `bool` | Required | none |
+| `id` | `string` | Computed | domain value, `UseStateForUnknown` |
+
+The registrar lock prevents unauthorized transfers. Like privacy, the resource
+takes the desired state as a boolean rather than existing-only-means-locked, so
+`locked = false` is a valid declaration that unlocks a domain.
+
+**Create/Update:** `DomainLock` or `DomainUnlock` for the desired state, called
+only when the plan and state disagree. Both operations accept their
+already-in-that-state reply (252 for lock, 253 for unlock) as success, so a race
+with the web UI cannot produce a spurious failure.
+
+**Read:** `GetDomainInfo(domain)` → `locked`.
+
+**Delete:** when state says locked, `DomainUnlock(domain)`; otherwise no API
+call. Removing the resource from configuration releases the lock, which the
+description states.
+
+Markdown description must state that unlocking a domain removes the main
+safeguard against an unauthorized transfer, and that some registry states
+(pending transfer, for example) reject both operations, surfacing the API error.
+
+### 6.7 ModifyPlan and drift
 
 `namesilo_nameservers`, `namesilo_dnssec_records`, and `namesilo_contact` use
 `ModifyPlan` only to normalize configured values to the shape Read writes:
@@ -504,9 +571,9 @@ fields, and an uppercased country code. Nothing else is computed in `ModifyPlan`
 beyond `namesilo_contact`'s `default_profile`, which is set in Create as
 described in §6.4; `id` uses `UseStateForUnknown`, and no attribute is
 `Computed` other than `id`, `default_profile`, and the four optional roles of
-`namesilo_domain_contacts`. `namesilo_privacy` and `namesilo_domain_contacts`
-need no plan modifier: a boolean and opaque contact IDs have nothing to
-normalize.
+`namesilo_domain_contacts`. `namesilo_privacy`, `namesilo_domain_contacts`,
+and `namesilo_domain_lock` need no plan modifier: booleans and opaque contact
+IDs have nothing to normalize.
 
 Normalization at plan time is what keeps a lowercase-only API from producing a
 perpetual diff. The plan, the applied state, and the next plan's normalized
@@ -524,17 +591,41 @@ apply resolves it.
 | `namesilo_dnssec_records` | `domain` | `records` — `set(object)`, the same four fields as the resource |
 | `namesilo_privacy` | `domain` | `enabled` — `bool` |
 | `namesilo_contacts` | none | `contacts` — `set(object)`: `contact_id`, `default_profile`, and every profile field |
+| `namesilo_domain` | `domain` | `created`, `expires`, `status`, `locked`, `private`, `auto_renew`, `traffic_type`, `email_verification_required`, `portfolio`, `forward_url`, `forward_type`, `nameservers`, `contact_ids` |
+| `namesilo_domains` | none | `domains` — `set(object)`: `name`, `created`, `expires`; `total` — `int64` |
 
 The data sources exist for the "list" half of the request: reading current
-delegation, DS records, privacy, and contact profiles without managing them, for
-outputs, comparisons, or drift detection in a plan. Each has its own `Read` that
-calls the same client operations as the resources and writes normalized values.
-The three domain-scoped schemas carry `id = domain`; `namesilo_contacts` has the
-fixed `id` `contacts`, because it is account-scoped.
+delegation, DS records, privacy, contact profiles, and domain inventory without
+managing them, for outputs, comparisons, or drift detection in a plan. Each has
+its own `Read` that calls the same client operations as the resources and writes
+normalized values. The domain-scoped schemas carry `id = domain`; the
+account-scoped ones have fixed IDs (`contacts`, `domains`).
 
 A data source whose `domain` is not in the account fails with the API error
 rather than returning an empty result: an empty result would be indistinguishable
 from a name typo.
+
+`namesilo_domain` exposes the whole `getDomainInfo` reply. `locked`, `private`,
+`auto_renew`, and `email_verification_required` are `Yes`/`No` in the reply and
+become booleans; the date fields stay strings in the API's `YYYY-MM-DD` form,
+and `forward_url`/`forward_type` are exposed exactly as the API sends them
+(`N/A` when forwarding is off), because mapping them to null would be a guess
+about a value the API is allowed to return. `nameservers` is normalized the same
+way the resource does it, and `contact_ids` is an object with the four roles.
+
+`namesilo_domains` pages `listDomains` using the provider's `page_size` until it
+has `pager.total` domains. The request includes `page` and `pageSize`, which the
+response's `pager` element implies. The client stops after a page that adds no
+new domain names, so an API that ignores those parameters terminates after one
+repeat instead of looping; in that case the data source emits a warning
+diagnostic that the list may be incomplete, and `total` still reports the API's
+count. `total` is exposed so a configuration can assert against it.
+
+`namesilo_contacts` returns full profiles, including the PII fields, because the
+resource and the data source are the only way to read account contacts; the
+same GDPR-driven `Sensitive` markings as §6.4 apply to the nested attributes.
+An account with no contacts (never seen in practice; every account has at least
+one default profile) returns an empty set rather than an error.
 
 `namesilo_contacts` returns full profiles, including the PII fields, because the
 resource and the data source are the only way to read account contacts; the
@@ -580,12 +671,14 @@ The XML envelope is:
 </namesilo>
 ```
 
-Codes 300, 301, and 302 are success. Codes 255 ("Domain is already Private - No
-update made") and 256 ("Domain is already Not Private - No update made") are
-accepted as success by the privacy operations only: they mean the requested
-state already holds, and treating them as errors would make an idempotent apply
-fail. Anything else is an `*APIError` carrying `Operation`, `Code`, and `Detail`.
-The relevant failure codes, from NameSilo's published list:
+Codes 300, 301, and 302 are success. Codes 255/256 ("already Private"/"already
+Not Private") are success for the privacy operations, and 252/253 ("already
+Locked"/"already Unlocked") are success for the lock operations: each means the
+requested state already holds, and treating it as an error would make an
+idempotent apply fail. The classification is per operation, so a 252 from an
+unsupported operation is still an error. Anything else is an `*APIError`
+carrying `Operation`, `Code`, and `Detail`. The relevant failure codes, from
+NameSilo's published list:
 
 | Code | Meaning |
 | --- | --- |
@@ -595,7 +688,11 @@ The relevant failure codes, from NameSilo's published list:
 | 115 | Central registry not responding |
 | 200 | Domain is not active, or does not belong to this user |
 | 210 | General error (detail in the reply) |
+| 252 | Domain is already locked; success for `domainLock` |
+| 253 | Domain is already unlocked; success for `domainUnlock` |
 | 254 | Nameserver update error |
+| 255 | Domain is already private; success for `addPrivacy` |
+| 256 | Domain is already not private; success for `removePrivacy` |
 | 280 | DNS modification error |
 | 400 | Existing API request is still processing |
 
@@ -610,12 +707,15 @@ type Client struct { /* endpoint, apiKey, version, *http.Client */ }
 func NewClient(endpoint, apiKey, version string) *Client
 
 func (c *Client) GetDomainInfo(ctx context.Context, domain string) (DomainInfo, error)
+func (c *Client) ListDomains(ctx context.Context, pageSize int64) (DomainList, error)
 func (c *Client) ChangeNameServers(ctx context.Context, domain string, nameservers []string) error
 func (c *Client) ListDSRecords(ctx context.Context, domain string) ([]DSRecord, error)
 func (c *Client) AddDSRecord(ctx context.Context, domain string, record DSRecord) error
 func (c *Client) DeleteDSRecord(ctx context.Context, domain string, record DSRecord) error
 func (c *Client) AddPrivacy(ctx context.Context, domain string) error
 func (c *Client) RemovePrivacy(ctx context.Context, domain string) error
+func (c *Client) DomainLock(ctx context.Context, domain string) error
+func (c *Client) DomainUnlock(ctx context.Context, domain string) error
 func (c *Client) ListContacts(ctx context.Context, contactID string) ([]Contact, error)
 func (c *Client) AddContact(ctx context.Context, contact Contact) (string, error)
 func (c *Client) UpdateContact(ctx context.Context, contact Contact) error
@@ -625,9 +725,33 @@ func (c *Client) AssociateContacts(ctx context.Context, domain string, roles Con
 
 ```go
 type DomainInfo struct {
-    Nameservers []string
-    Private     bool
-    Contacts    ContactRoles
+    Created                   string
+    Expires                   string
+    Status                    string
+    Locked                    bool
+    Private                   bool
+    AutoRenew                 bool
+    TrafficType               string
+    EmailVerificationRequired bool
+    Portfolio                 string
+    ForwardURL                string
+    ForwardType               string
+    Nameservers               []string
+    Contacts                  ContactRoles
+}
+
+// DomainSummary is one listDomains row: the name element's text plus its
+// created and expires attributes.
+type DomainSummary struct {
+    Name    string
+    Created string
+    Expires string
+}
+
+// DomainList is every page ListDomains fetched, plus the API's pager total.
+type DomainList struct {
+    Domains []DomainSummary
+    Total   int64
 }
 
 // ContactRoles is a set of associations. An empty field means "not managed",
@@ -677,12 +801,23 @@ type DSRecord struct {
 Field mapping: `dnsSecAddRecord` and `dnsSecDeleteRecord` take `domain`,
 `digest`, `keyTag`, `digestType`, and `alg`; `dnsSecListRecords` returns
 `ds_record` elements with `digest`, `digest_type`, `algorithm`, and `key_tag`.
-`getDomainInfo` returns `nameservers > nameserver` elements whose text is the
-name and whose `position` attribute is an index, a `private` element whose value
-is `Yes` or `No`, and a `contact_ids` element with `registrant`,
-`administrative`, `technical`, and `billing` children. `changeNameServers` takes
-`domain` plus `ns1`–`ns13`, of which the first two are required. `addPrivacy`
-and `removePrivacy` take only `domain`.
+`getDomainInfo` returns `created`, `expires`, `status`, `locked`, `private`,
+`auto_renew`, `traffic_type`, `email_verification_required`, `portfolio`,
+`forward_url`, and `forward_type` elements, `nameservers > nameserver` elements
+whose text is the name and whose `position` attribute is an index, and a
+`contact_ids` element with `registrant`, `administrative`, `technical`, and
+`billing` children. `changeNameServers` takes `domain` plus `ns1`–`ns13`, of
+which the first two are required. `addPrivacy`, `removePrivacy`, `domainLock`,
+and `domainUnlock` take only `domain`.
+
+`listDomains` takes an optional `portfolio` filter (not exposed in v1) and
+returns `domains > domain` elements whose text is the name and whose `created`
+and `expires` attributes are dates, plus a `pager` with `total`, `pageSize`, and
+`page`. `ListDomains(ctx, pageSize)` requests `pageSize` and pages
+`page=1,2,…` until it has `total` domains or a page contributes no new names,
+returning the accumulated list and the API's last reported total. The loop
+sends the parameters the pager implies; if the API ignores them, it exits after
+the first repeat rather than looping.
 
 `contactAdd` takes the required fields `fn`, `ln`, `ad`, `cy`, `st`, `zp`,
 `ct`, `em`, `ph` and the optional fields `nn`, `cp`, `ad2`, `fx`, `usnc`,
@@ -706,9 +841,14 @@ each of which gets a fixture:
   produced as an empty record.
 - Nameserver names come back uppercased with a trailing dot sometimes; digests
   come back uppercased.
-- `private` is `Yes` or `No`, matched case-insensitively. Any other value is an
-  error rather than a default: guessing would silently flip a domain's WHOIS
-  exposure.
+- `private`, `locked`, `auto_renew`, and `email_verification_required` are
+  `Yes` or `No`, matched case-insensitively. Any other value is an error rather
+  than a default: guessing would silently flip a domain's WHOIS exposure, lock
+  state, auto-renewal, or verification state.
+- `listDomains` rows are name elements with attributes, not child elements:
+  `DomainSummary` reads the chardata and the `created`/`expires` attributes. The
+  optional `maxBid` attribute is ignored. A page with zero domains is a valid
+  empty account, not an error.
 - Unset contact fields come back as empty elements (`<address2/>`), so the
   client normalizes the whole element set to empty strings and the provider
   layer maps those to null. A single `contact` element in a `contactList`
@@ -771,18 +911,19 @@ to call Update.
   `UseStateForUnknown` on update. `namesilo_contact` is the exception: its `id`
   is the API's `contact_id`.
 - Import is `tofu import namesilo_nameservers.example example.com` and the same
-  form for `namesilo_dnssec_records`, `namesilo_privacy`, and
-  `namesilo_domain_contacts`. `namesilo_contact` imports by `contact_id`.
-  `ImportState` sets `domain` or `id` from the import ID and leaves everything
-  else to `Read`, so an imported resource converges on the real state without a
-  config-specific seed (unlike the accumulator, which had no external system to
-  read).
+  form for `namesilo_dnssec_records`, `namesilo_privacy`,
+  `namesilo_domain_contacts`, and `namesilo_domain_lock`. `namesilo_contact`
+  imports by `contact_id`. `ImportState` sets `domain` or `id` from the import
+  ID and leaves everything else to `Read`, so an imported resource converges on
+  the real state without a config-specific seed (unlike the accumulator, which
+  had no external system to read).
 - Importing a domain with no DS records produces an empty set, which is a valid
   configuration (`records = []`) and therefore an empty plan once the config
   matches.
 - Drift detection is the normal refresh: a nameserver change made in the web UI
   shows as an update, a DS record removed outside Terraform is re-added, a DS
   record added outside Terraform is removed, a privacy toggle made in the web UI
+  shows as an update in the opposite direction, a lock toggle made in the web UI
   shows as an update in the opposite direction, a contact profile edited in the
   web UI shows as an update, and a role reassigned in the web UI shows as an
   update when that role is configured.
@@ -821,10 +962,15 @@ Three tiers, each hermetic or opt-in; `make test` runs the first two.
 - Pure helpers: `NormalizeNameserver(s)`, `SameNameservers`, `NormalizeDSRecord`,
   `DiffDSRecords` including empty inputs, adds and removes in one diff,
   case-only differences, and deterministic ordering.
-- Privacy: `addPrivacy`/`removePrivacy` request shapes, and reply-code
-  classification for 255 and 256, which are success for privacy operations and
-  errors for every other operation. `private` parsing accepts `Yes`/`No` in any
-  case and errors on anything else.
+- Privacy and lock: `addPrivacy`/`removePrivacy`/`domainLock`/`domainUnlock`
+  request shapes, and reply-code classification for 252/253/255/256, which are
+  success for their operation and errors for every other operation. `private`,
+  `locked`, `auto_renew`, and `email_verification_required` parsing accepts
+  `Yes`/`No` in any case and errors on anything else.
+- Domain inventory: `listDomains` with one page, with multiple pages, with a
+  `total` larger than what pagination returns (the duplicate-page guard), and
+  with an empty account. Request assertions cover `page` and `pageSize`, and a
+  `DomainSummary` fixture with and without `maxBid`.
 - Contacts: `contactAdd`/`contactUpdate`/`contactDelete` request shapes,
   `contactList` with and without a `contact_id`, fixtures with two profiles,
   one profile, and zero profiles, empty elements normalizing to empty strings,
@@ -873,6 +1019,12 @@ Cases:
 | privacy toggle | Each direction change issues exactly one call |
 | privacy drift | Flipping the fake's `private` out of band plans an update in the opposite direction |
 | privacy destroy | Destroy calls `removePrivacy` when enabled, and makes no call when disabled |
+| lock create | The fake recorded `domainLock` or `domainUnlock` for the configured `locked` value, and each is idempotent against the fake's already-in-state reply |
+| lock drift | Toggling the fake's `locked` out of band plans an update in the opposite direction |
+| lock destroy | Destroy calls `domainUnlock` when the state says locked, and makes no call when unlocked |
+| domain data source | Every `getDomainInfo` field is returned, booleans parsed, nameservers lowercased |
+| domains data source | Multiple fake pages are combined and match the fake's domain set; `total` matches |
+| domains paging guard | A fake that ignores `page` does not loop and the data source emits the incomplete-list warning |
 | contact create | `contactAdd` records every configured field and the returned `contact_id` becomes `id` |
 | contact update | Changing a field issues one `contactUpdate` and the plan is quiet afterwards |
 | contact empty optional | Omitted optional fields come back from the fake as empty elements and plan quietly |
@@ -884,8 +1036,8 @@ Cases:
 | association update | Changing one role sends one call with that role and leaves the rest |
 | association drift | Reassigning a role in the fake plans an update for that role only |
 | association destroy | Destroy makes no API call and leaves the fake's associations intact |
-| import all five | Import yields state that matches the fake and plans empty |
-| data sources | All four return normalized values that match the fake |
+| import all six | Import yields state that matches the fake and plans empty |
+| data sources | All six return normalized values that match the fake |
 
 ### 12.3 Live acceptance tests (`internal/provider`, opt-in)
 
@@ -896,23 +1048,27 @@ missing `TF_ACC` skips as usual. DS mutation tests additionally require
 `NAMESILO_TEST_DNSSEC=1`, privacy mutation tests require
 `NAMESILO_TEST_PRIVACY=1`, because privacy is unavailable for some TLDs and
 toggles WHOIS exposure, contact mutation tests require `NAMESILO_TEST_CONTACT=1`
-because they add and delete profiles in a live account, and association tests
+because they add and delete profiles in a live account, association tests
 require `NAMESILO_TEST_DOMAIN_CONTACTS=1` because changing a domain's registrant
-can trigger registry verification and, for some TLDs, is restricted.
+can trigger registry verification and, for some TLDs, is restricted, and lock
+mutation tests require `NAMESILO_TEST_LOCK=1` because unlocking a live domain
+removes its main transfer safeguard.
 
 `NAMESILO_TEST_DOMAIN` must be a **disposable domain** in the account: the
 nameserver tests repoint its delegation (to `ns1.example.net`/`ns2.example.net`
 and back to the dnsowl defaults on destroy), the DS tests publish and delete a
 synthetic DS record, which makes the domain fail DNSSEC validation while it
-exists, the privacy tests toggle WHOIS privacy, and the association tests
+exists, the privacy and lock tests toggle their flags, and the association tests
 repoint a role at a throwaway profile.
 
-Cases: read all four data sources; create/read/update/destroy the nameservers
+Cases: read all six data sources; create/read/update/destroy the nameservers
 resource and assert quiet plans; import every resource; add, roll, and remove a
 DS record; enable, disable, and re-enable privacy; create, update, and delete a
 contact profile; reassign a domain role and assert the other roles are
-untouched. Nothing in CI requires these; they are the contract check that the
-XML fixtures match the real API, and they run with `make testacc-live`.
+untouched; lock and unlock; and assert the `namesilo_domains` list contains
+`NAMESILO_TEST_DOMAIN` with `total` at least the number of returned rows.
+Nothing in CI requires these; they are the contract check that the XML fixtures
+match the real API, and they run with `make testacc-live`.
 
 ## 13. Documentation
 
@@ -986,8 +1142,8 @@ OpenTofu instead.
 - **Own client over `nrdcg/namesilo`.** The library is maintained and its
   licence is fine, but it is generated from 2019 documentation, embeds raw
   response bodies in errors (an API-key redaction problem, since the request
-  carries the key), and wraps nothing we would not write ourselves. Five GET
-  operations do not justify the dependency.
+  carries the key), and wraps nothing we would not write ourselves. Fifteen
+  small GET operations do not justify the dependency.
 - **XML over JSON.** The API serves both, but only XML is documented with
   examples and exercised by every community client; the JSON shape is
   undocumented.
@@ -1017,10 +1173,12 @@ OpenTofu instead.
   by the project owner. `enabled = false` lets configuration assert "this domain
   must not use PrivacyGuardian", which a presence-only resource cannot express,
   and it makes drift visible in both directions.
-- **Privacy's 255/256 replies are success.** They mean "already private" and
-  "already not private". Treating them as errors, as the community Go client
-  does, would make a converging apply fail. The classification is scoped to the
-  privacy operations so a 255/256 from another operation is still an error.
+- **Already-in-state replies are success for their own operation only.** 255
+  and 256 mean "already private"/"already not private"; 252 and 253 mean
+  "already locked"/"already unlocked". Treating them as errors, as the
+  community Go client does, would make a converging apply fail. The
+  classification is per operation, so one of these codes from an unrelated
+  operation is still an error.
 - **Contact profiles and contact associations are separate resources.** A
   profile is account-scoped and can be referenced by many domains; an
   association is domain-scoped. Merging them would recreate the profile on
@@ -1045,6 +1203,20 @@ OpenTofu instead.
   companion version attribute, and are only supported by OpenTofu from 1.11.
   The resource descriptions point practitioners at `sensitive = true` on their
   own input variables for stronger masking.
+- **`listDomains` paging is optimistic but fail-safe.** The request sends `page`
+  and `pageSize` because the reply's `pager` element implies them, the allowed
+  sizes are the ones NameSilo's UI offers, and the default is 100. If the API
+  ignores the parameters, the duplicate-page guard stops after one repeat and
+  the data source warns instead of looping or silently returning a short list.
+  The live acceptance test is what confirms the assumption.
+- **`namesilo_domain` exposes API strings unchanged.** `forward_url` and
+  `forward_type` come back as `N/A` when forwarding is off; mapping that to null
+  would invent a contract the API does not state, so the data source returns
+  what it got.
+- **Destroying `namesilo_domain_lock` unlocks when locked.** Chosen by the
+  project owner, matching the privacy resource: removing the resource releases
+  what it manages. The description says that this removes the main safeguard
+  against an unauthorized transfer.
 - **No provider-defined functions or ephemeral resources.** Nothing in the
   scope needs either.
 
@@ -1078,5 +1250,11 @@ OpenTofu instead.
 - `contactList` is called once with no offset. If NameSilo returns a partial
   list for a large account, the data source surfaces exactly what the API
   returned.
+- `listDomains` paging parameters are inferred from the response's `pager`
+  element rather than documented: a configuration with more than one page of
+  domains either pages correctly or gets the warning diagnostic described in
+  §7, and never sees a silently truncated list.
+- Some registry states reject `domainLock` and `domainUnlock` (a pending
+  transfer, for example); the API error is surfaced unchanged.
 - The sandbox environment requires credentials from NameSilo support; the
   `endpoint` attribute makes it usable, but CI cannot exercise it.
