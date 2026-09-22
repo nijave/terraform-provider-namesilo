@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
@@ -63,4 +64,62 @@ func nullIfEmpty(value string) types.String {
 		return types.StringNull()
 	}
 	return types.StringValue(value)
+}
+
+// dsRecordObjectType is the element type of the dnssec records set: the four
+// DS fields with their framework types, named as the schema spells them.
+func dsRecordObjectType() types.ObjectType {
+	return types.ObjectType{AttrTypes: map[string]attr.Type{
+		"key_tag":     types.Int64Type,
+		"algorithm":   types.Int64Type,
+		"digest_type": types.Int64Type,
+		"digest":      types.StringType,
+	}}
+}
+
+// dsSetFromRecords converts a slice of DS records to a set(object). A nil
+// slice becomes an empty set, never null: records = [] is a valid declaration
+// that the domain is unsigned, and it is also what Read writes for an empty
+// API reply (§4 invariant 2).
+func dsSetFromRecords(ctx context.Context, records []namesilo.DSRecord) (types.Set, diag.Diagnostics) {
+	if records == nil {
+		records = []namesilo.DSRecord{}
+	}
+	models := make([]dsRecordModel, 0, len(records))
+	for _, record := range records {
+		models = append(models, dsRecordModel{
+			KeyTag:     types.Int64Value(record.KeyTag),
+			Algorithm:  types.Int64Value(record.Algorithm),
+			DigestType: types.Int64Value(record.DigestType),
+			Digest:     types.StringValue(record.Digest),
+		})
+	}
+	return types.SetValueFrom(ctx, dsRecordObjectType(), models)
+}
+
+// recordsFromDSSet converts a set(object) to a slice of DS records. Null and
+// unknown are both treated as absent and produce a nil slice with no
+// diagnostic: a null required attribute is a schema violation the framework
+// already reports, and an unknown value is resolved before Create or Update
+// runs. Element order is not meaningful for a set.
+func recordsFromDSSet(ctx context.Context, set types.Set) ([]namesilo.DSRecord, diag.Diagnostics) {
+	var diags diag.Diagnostics
+	if set.IsNull() || set.IsUnknown() {
+		return nil, diags
+	}
+	var models []dsRecordModel
+	diags.Append(set.ElementsAs(ctx, &models, false)...)
+	if diags.HasError() {
+		return nil, diags
+	}
+	records := make([]namesilo.DSRecord, 0, len(models))
+	for _, model := range models {
+		records = append(records, namesilo.DSRecord{
+			KeyTag:     model.KeyTag.ValueInt64(),
+			Algorithm:  model.Algorithm.ValueInt64(),
+			DigestType: model.DigestType.ValueInt64(),
+			Digest:     model.Digest.ValueString(),
+		})
+	}
+	return records, diags
 }

@@ -35,6 +35,7 @@ var testAccProtoV6ProviderFactories = map[string]func() (tfprotov6.ProviderServe
 // cover. Each resource task appends its type name here.
 var expectedResourceTypes = []string{
 	"namesilo_nameservers",
+	"namesilo_dnssec_records",
 }
 
 // expectedDataSourceTypes lists every data source type the harness tests must

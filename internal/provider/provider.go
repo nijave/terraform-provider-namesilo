@@ -78,6 +78,7 @@ func (p *namesiloProvider) Schema(_ context.Context, _ provider.SchemaRequest, r
 func (p *namesiloProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewNameserversResource,
+		NewDNSSecRecordsResource,
 	}
 }
 

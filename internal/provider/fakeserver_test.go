@@ -111,6 +111,28 @@ func (f *fakeNamesilo) setNameservers(name string, nameservers []string) {
 	}
 }
 
+// setDSRecords mutates one domain's DS records out of band, the way a change
+// in NameSilo's web UI would. The drift tests call it from PreConfig.
+func (f *fakeNamesilo) setDSRecords(name string, records []namesilo.DSRecord) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if d, ok := f.domains[name]; ok {
+		d.dsRecords = append([]namesilo.DSRecord(nil), records...)
+	}
+}
+
+// dsRecordsFor returns a copy of one domain's DS records, so a CheckDestroy
+// can assert the destroy left none behind without racing a handler.
+func (f *fakeNamesilo) dsRecordsFor(name string) []namesilo.DSRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d, ok := f.domains[name]
+	if !ok {
+		return nil
+	}
+	return append([]namesilo.DSRecord(nil), d.dsRecords...)
+}
+
 // failWith makes an operation always reply with the given code and detail.
 func (f *fakeNamesilo) failWith(operation, code, detail string) {
 	f.mu.Lock()
@@ -182,6 +204,12 @@ func (f *fakeNamesilo) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleGetDomainInfo(w, "getDomainInfo", query.Get("domain"))
 	case "changeNameServers":
 		f.handleChangeNameServers(w, "changeNameServers", query)
+	case "dnsSecListRecords":
+		f.handleDNSSecListRecords(w, "dnsSecListRecords", query.Get("domain"))
+	case "dnsSecAddRecord":
+		f.handleDNSSecAddRecord(w, "dnsSecAddRecord", query)
+	case "dnsSecDeleteRecord":
+		f.handleDNSSecDeleteRecord(w, "dnsSecDeleteRecord", query)
 	default:
 		writeReply(w, operation, "400", "unsupported operation "+operation, "")
 	}
@@ -261,9 +289,120 @@ func (f *fakeNamesilo) handleChangeNameServers(w http.ResponseWriter, operation 
 	writeReply(w, operation, "300", "success", "")
 }
 
+// handleDNSSecListRecords renders the domain's DS records in the response's
+// own snake_case shape: digest, digest_type, algorithm, and key_tag. An
+// unsigned domain emits no ds_record element at all, so the reply body is
+// empty and the client's empty-slice contract is exercised end to end.
+func (f *fakeNamesilo) handleDNSSecListRecords(w http.ResponseWriter, operation, domain string) {
+	f.mu.Lock()
+	d, ok := f.domains[domain]
+	if ok {
+		d = cloneFakeDomain(d)
+	}
+	f.mu.Unlock()
+
+	if !ok {
+		writeReply(w, operation, "200", "Domain is not active, or does not belong to this user", "")
+		return
+	}
+
+	var b strings.Builder
+	for _, record := range d.dsRecords {
+		b.WriteString("<ds_record>")
+		b.WriteString("<key_tag>" + strconv.FormatInt(record.KeyTag, 10) + "</key_tag>")
+		b.WriteString("<algorithm>" + strconv.FormatInt(record.Algorithm, 10) + "</algorithm>")
+		b.WriteString("<digest_type>" + strconv.FormatInt(record.DigestType, 10) + "</digest_type>")
+		b.WriteString("<digest>" + xmlEscape(record.Digest) + "</digest>")
+		b.WriteString("</ds_record>")
+	}
+
+	writeReply(w, operation, "300", "success", b.String())
+}
+
+// dsRecordFromQuery reads one DS record off a dnsSecAddRecord or
+// dnsSecDeleteRecord request. The request spells the fields its own way
+// (keyTag, digestType, alg), the asymmetry the client documents (§12.1).
+func dsRecordFromQuery(query map[string][]string) (namesilo.DSRecord, error) {
+	keyTag, err := strconv.ParseInt(firstValue(query, "keyTag"), 10, 64)
+	if err != nil {
+		return namesilo.DSRecord{}, fmt.Errorf("keyTag: %v", err)
+	}
+	algorithm, err := strconv.ParseInt(firstValue(query, "alg"), 10, 64)
+	if err != nil {
+		return namesilo.DSRecord{}, fmt.Errorf("alg: %v", err)
+	}
+	digestType, err := strconv.ParseInt(firstValue(query, "digestType"), 10, 64)
+	if err != nil {
+		return namesilo.DSRecord{}, fmt.Errorf("digestType: %v", err)
+	}
+	return namesilo.DSRecord{
+		KeyTag:     keyTag,
+		Algorithm:  algorithm,
+		DigestType: digestType,
+		Digest:     firstValue(query, "digest"),
+	}, nil
+}
+
+// handleDNSSecAddRecord appends one DS record to the domain and replies 300.
+// The record is stored as sent: the digest's case is the provider layer's
+// concern, and the fake is deliberately not helpful about it.
+func (f *fakeNamesilo) handleDNSSecAddRecord(w http.ResponseWriter, operation string, query map[string][]string) {
+	domain := firstValue(query, "domain")
+	record, err := dsRecordFromQuery(query)
+	if err != nil {
+		writeReply(w, operation, "400", "malformed DS record: "+err.Error(), "")
+		return
+	}
+
+	f.mu.Lock()
+	d, ok := f.domains[domain]
+	if ok {
+		d.dsRecords = append(d.dsRecords, record)
+	}
+	f.mu.Unlock()
+
+	if !ok {
+		writeReply(w, operation, "200", "Domain is not active, or does not belong to this user", "")
+		return
+	}
+	writeReply(w, operation, "300", "success", "")
+}
+
+// handleDNSSecDeleteRecord removes the matching DS record, comparing tuples
+// canonically so a record stored with a differently-cased digest still matches.
+// Deleting a record that is not present is a no-op, which is what makes the
+// provider's list-then-delete reconcile idempotent (§4 invariant 3).
+func (f *fakeNamesilo) handleDNSSecDeleteRecord(w http.ResponseWriter, operation string, query map[string][]string) {
+	domain := firstValue(query, "domain")
+	record, err := dsRecordFromQuery(query)
+	if err != nil {
+		writeReply(w, operation, "400", "malformed DS record: "+err.Error(), "")
+		return
+	}
+	want := namesilo.NormalizeDSRecord(record).Key()
+
+	f.mu.Lock()
+	d, ok := f.domains[domain]
+	if ok {
+		kept := make([]namesilo.DSRecord, 0, len(d.dsRecords))
+		for _, existing := range d.dsRecords {
+			if namesilo.NormalizeDSRecord(existing).Key() != want {
+				kept = append(kept, existing)
+			}
+		}
+		d.dsRecords = kept
+	}
+	f.mu.Unlock()
+
+	if !ok {
+		writeReply(w, operation, "200", "Domain is not active, or does not belong to this user", "")
+		return
+	}
+	writeReply(w, operation, "300", "success", "")
+}
+
 // cloneFakeDomain copies a domain so a handler can render it after releasing
-// the lock. Slices and the roles struct are copied; the DS records are not
-// mutated by any handler in this task.
+// the lock. Slices and the roles struct are copied, including the DS records.
 func cloneFakeDomain(d *fakeDomain) *fakeDomain {
 	out := *d
 	out.nameservers = append([]string(nil), d.nameservers...)
