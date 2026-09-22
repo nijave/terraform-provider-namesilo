@@ -66,6 +66,70 @@ func nullIfEmpty(value string) types.String {
 	return types.StringValue(value)
 }
 
+// contactToModel maps the client's Contact onto the resource's state model.
+// Every string field goes through nullIfEmpty, because the API returns unset
+// fields as empty elements; a required field that arrives empty therefore
+// becomes null and diffs, which is the honest report of an API anomaly rather
+// than a silent empty value (§6.4).
+func contactToModel(contact namesilo.Contact) contactResourceModel {
+	return contactResourceModel{
+		FirstName:            nullIfEmpty(contact.FirstName),
+		LastName:             nullIfEmpty(contact.LastName),
+		Address:              nullIfEmpty(contact.Address),
+		Address2:             nullIfEmpty(contact.Address2),
+		City:                 nullIfEmpty(contact.City),
+		State:                nullIfEmpty(contact.State),
+		Zip:                  nullIfEmpty(contact.Zip),
+		Country:              nullIfEmpty(contact.Country),
+		Email:                nullIfEmpty(contact.Email),
+		Phone:                nullIfEmpty(contact.Phone),
+		Fax:                  nullIfEmpty(contact.Fax),
+		Company:              nullIfEmpty(contact.Company),
+		Nickname:             nullIfEmpty(contact.Nickname),
+		UsNexusCategory:      nullIfEmpty(contact.UsNexusCategory),
+		UsApplicationPurpose: nullIfEmpty(contact.UsApplicationPurpose),
+		CaLegalForm:          nullIfEmpty(contact.CaLegalForm),
+		CaLanguage:           nullIfEmpty(contact.CaLanguage),
+		CaAgreementVersion:   nullIfEmpty(contact.CaAgreementVersion),
+		CaWhoisDisplay:       nullIfEmpty(contact.CaWhoisDisplay),
+		EuCitizenshipCountry: nullIfEmpty(contact.EuCitizenshipCountry),
+		DefaultProfile:       types.BoolValue(contact.DefaultProfile),
+		ID:                   types.StringValue(contact.ID),
+	}
+}
+
+// modelToContact maps the resource's state model onto the client's Contact. A
+// null attribute reads as the empty string the API sends for "unset"; every
+// field is sent, empty values included, so the request is deterministic
+// (§8.1). default_profile is carried so an update can preserve it; it is not
+// a request parameter.
+func modelToContact(model contactResourceModel) namesilo.Contact {
+	return namesilo.Contact{
+		ID:                   model.ID.ValueString(),
+		DefaultProfile:       model.DefaultProfile.ValueBool(),
+		FirstName:            model.FirstName.ValueString(),
+		LastName:             model.LastName.ValueString(),
+		Address:              model.Address.ValueString(),
+		Address2:             model.Address2.ValueString(),
+		City:                 model.City.ValueString(),
+		State:                model.State.ValueString(),
+		Zip:                  model.Zip.ValueString(),
+		Country:              model.Country.ValueString(),
+		Email:                model.Email.ValueString(),
+		Phone:                model.Phone.ValueString(),
+		Fax:                  model.Fax.ValueString(),
+		Company:              model.Company.ValueString(),
+		Nickname:             model.Nickname.ValueString(),
+		UsNexusCategory:      model.UsNexusCategory.ValueString(),
+		UsApplicationPurpose: model.UsApplicationPurpose.ValueString(),
+		CaLegalForm:          model.CaLegalForm.ValueString(),
+		CaLanguage:           model.CaLanguage.ValueString(),
+		CaAgreementVersion:   model.CaAgreementVersion.ValueString(),
+		CaWhoisDisplay:       model.CaWhoisDisplay.ValueString(),
+		EuCitizenshipCountry: model.EuCitizenshipCountry.ValueString(),
+	}
+}
+
 // dsRecordObjectType is the element type of the dnssec records set: the four
 // DS fields with their framework types, named as the schema spells them.
 func dsRecordObjectType() types.ObjectType {

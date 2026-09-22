@@ -38,9 +38,13 @@ type fakeNamesilo struct {
 	// of its real behaviour.
 	failures map[string]fakeFailure
 
-	// contacts and associations are unused in this task; later resource tasks
-	// extend the store for them.
-	contacts map[string]map[string]string
+	// contacts is the account's contact profiles, keyed by contact_id, guarded
+	// by mu like the domains.
+	contacts map[string]namesilo.Contact
+
+	// nextContactID is the contactAdd ID sequence: the first assigned ID is
+	// 1001.
+	nextContactID int
 }
 
 // fakeDomain is one domain's mutable registrar state. Fields are exported to
@@ -69,9 +73,10 @@ type fakeFailure struct {
 // newFakeNamesilo starts the fake server. Callers must Close it.
 func newFakeNamesilo() *fakeNamesilo {
 	f := &fakeNamesilo{
-		domains:  make(map[string]*fakeDomain),
-		failures: make(map[string]fakeFailure),
-		contacts: make(map[string]map[string]string),
+		domains:       make(map[string]*fakeDomain),
+		failures:      make(map[string]fakeFailure),
+		contacts:      make(map[string]namesilo.Contact),
+		nextContactID: 1000,
 	}
 	f.server = httptest.NewServer(http.HandlerFunc(f.handle))
 	return f
@@ -179,6 +184,57 @@ func (f *fakeNamesilo) failWith(operation, code, detail string) {
 	f.failures[operation] = fakeFailure{code: code, detail: detail}
 }
 
+// clearFailure removes a failure injection. The destroy-blocked harness test
+// arms contactDelete with failWith to surface the "still associated with a
+// domain" refusal, then clears it so a follow-up destroy can clean up.
+func (f *fakeNamesilo) clearFailure(operation string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.failures, operation)
+}
+
+// seedContact stores a profile directly under the given contact_id. Tests use
+// it to seed the account's existing profiles (an import target, the account
+// default, the gone-profile scenario) before the provider ever runs.
+func (f *fakeNamesilo) seedContact(id string, contact namesilo.Contact) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	contact.ID = id
+	f.contacts[id] = contact
+}
+
+// mutateContact edits a stored profile out of band, the way a change in
+// NameSilo's web UI would. The drift tests call it from PreConfig. It reports
+// whether the profile existed.
+func (f *fakeNamesilo) mutateContact(id string, edit func(*namesilo.Contact)) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	contact, ok := f.contacts[id]
+	if !ok {
+		return false
+	}
+	edit(&contact)
+	f.contacts[id] = contact
+	return true
+}
+
+// removeContact deletes a stored profile out of band, the way a profile
+// deleted in the web UI would. The gone tests call it from PreConfig.
+func (f *fakeNamesilo) removeContact(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.contacts, id)
+}
+
+// contactFor returns a copy of a stored profile and whether it exists, so a
+// CheckDestroy can assert a contact is gone without racing a handler.
+func (f *fakeNamesilo) contactFor(id string) (namesilo.Contact, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	contact, ok := f.contacts[id]
+	return contact, ok
+}
+
 // ops is every recorded request, in arrival order.
 func (f *fakeNamesilo) ops() []string {
 	f.mu.Lock()
@@ -261,6 +317,14 @@ func (f *fakeNamesilo) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleAddAutoRenewal(w, "addAutoRenewal", query.Get("domain"))
 	case "removeAutoRenewal":
 		f.handleRemoveAutoRenewal(w, "removeAutoRenewal", query.Get("domain"))
+	case "contactList":
+		f.handleContactList(w, "contactList", query)
+	case "contactAdd":
+		f.handleContactAdd(w, "contactAdd", query)
+	case "contactUpdate":
+		f.handleContactUpdate(w, "contactUpdate", query)
+	case "contactDelete":
+		f.handleContactDelete(w, "contactDelete", query)
 	default:
 		writeReply(w, operation, "400", "unsupported operation "+operation, "")
 	}
@@ -591,6 +655,154 @@ func (f *fakeNamesilo) handleRemoveAutoRenewal(w http.ResponseWriter, operation,
 		writeReply(w, operation, "251", "Domain is already set not to AutoRenew", "")
 		return
 	}
+	writeReply(w, operation, "300", "success", "")
+}
+
+// contactFromQuery reads a Contact off a contactAdd or contactUpdate request.
+// Every field is sent under the API's short names, empty values included
+// (§8.1), so an absent parameter and an empty one both read as "". Field names
+// with no request parameter (contact_id on an add) are left empty.
+func contactFromQuery(query map[string][]string) namesilo.Contact {
+	return namesilo.Contact{
+		ID:                   firstValue(query, "contact_id"),
+		Nickname:             firstValue(query, "nn"),
+		Company:              firstValue(query, "cp"),
+		FirstName:            firstValue(query, "fn"),
+		LastName:             firstValue(query, "ln"),
+		Address:              firstValue(query, "ad"),
+		Address2:             firstValue(query, "ad2"),
+		City:                 firstValue(query, "cy"),
+		State:                firstValue(query, "st"),
+		Zip:                  firstValue(query, "zp"),
+		Country:              firstValue(query, "ct"),
+		Email:                firstValue(query, "em"),
+		Phone:                firstValue(query, "ph"),
+		Fax:                  firstValue(query, "fx"),
+		UsNexusCategory:      firstValue(query, "usnc"),
+		UsApplicationPurpose: firstValue(query, "usap"),
+		CaLegalForm:          firstValue(query, "calf"),
+		CaLanguage:           firstValue(query, "caln"),
+		CaAgreementVersion:   firstValue(query, "caag"),
+		CaWhoisDisplay:       firstValue(query, "cawd"),
+		EuCitizenshipCountry: firstValue(query, "eucs"),
+	}
+}
+
+// contactReply renders one <contact> element. Every field is emitted; unset
+// optionals arrive as empty elements, the shape the client normalizes to empty
+// strings. default_profile is always the strict 1/0 the client requires.
+func contactReply(contact namesilo.Contact) string {
+	defaultProfile := "0"
+	if contact.DefaultProfile {
+		defaultProfile = "1"
+	}
+	var b strings.Builder
+	b.WriteString("<contact>")
+	b.WriteString("<contact_id>" + xmlEscape(contact.ID) + "</contact_id>")
+	b.WriteString("<default_profile>" + defaultProfile + "</default_profile>")
+	b.WriteString("<nn>" + xmlEscape(contact.Nickname) + "</nn>")
+	b.WriteString("<cp>" + xmlEscape(contact.Company) + "</cp>")
+	b.WriteString("<fn>" + xmlEscape(contact.FirstName) + "</fn>")
+	b.WriteString("<ln>" + xmlEscape(contact.LastName) + "</ln>")
+	b.WriteString("<ad>" + xmlEscape(contact.Address) + "</ad>")
+	b.WriteString("<ad2>" + xmlEscape(contact.Address2) + "</ad2>")
+	b.WriteString("<cy>" + xmlEscape(contact.City) + "</cy>")
+	b.WriteString("<st>" + xmlEscape(contact.State) + "</st>")
+	b.WriteString("<zp>" + xmlEscape(contact.Zip) + "</zp>")
+	b.WriteString("<ct>" + xmlEscape(contact.Country) + "</ct>")
+	b.WriteString("<em>" + xmlEscape(contact.Email) + "</em>")
+	b.WriteString("<ph>" + xmlEscape(contact.Phone) + "</ph>")
+	b.WriteString("<fx>" + xmlEscape(contact.Fax) + "</fx>")
+	b.WriteString("<usnc>" + xmlEscape(contact.UsNexusCategory) + "</usnc>")
+	b.WriteString("<usap>" + xmlEscape(contact.UsApplicationPurpose) + "</usap>")
+	b.WriteString("<calf>" + xmlEscape(contact.CaLegalForm) + "</calf>")
+	b.WriteString("<caln>" + xmlEscape(contact.CaLanguage) + "</caln>")
+	b.WriteString("<caag>" + xmlEscape(contact.CaAgreementVersion) + "</caag>")
+	b.WriteString("<cawd>" + xmlEscape(contact.CaWhoisDisplay) + "</cawd>")
+	b.WriteString("<eucs>" + xmlEscape(contact.EuCitizenshipCountry) + "</eucs>")
+	b.WriteString("</contact>")
+	return b.String()
+}
+
+// handleContactList renders the account's profiles. A non-empty contact_id
+// asks for that one profile (or none); an empty one asks for every profile,
+// ordered by contact_id for determinism.
+func (f *fakeNamesilo) handleContactList(w http.ResponseWriter, operation string, query map[string][]string) {
+	id := firstValue(query, "contact_id")
+
+	f.mu.Lock()
+	contacts := make([]namesilo.Contact, 0, len(f.contacts))
+	if id != "" {
+		if contact, ok := f.contacts[id]; ok {
+			contacts = append(contacts, contact)
+		}
+	} else {
+		for _, contact := range f.contacts {
+			contacts = append(contacts, contact)
+		}
+		sort.Slice(contacts, func(i, j int) bool { return contacts[i].ID < contacts[j].ID })
+	}
+	f.mu.Unlock()
+
+	var b strings.Builder
+	for _, contact := range contacts {
+		b.WriteString(contactReply(contact))
+	}
+	writeReply(w, operation, "300", "success", b.String())
+}
+
+// handleContactAdd stores the submitted profile under the next sequential
+// contact_id and echoes it in the reply. The new profile is not the account
+// default: only pre-seeded profiles carry default_profile = 1.
+func (f *fakeNamesilo) handleContactAdd(w http.ResponseWriter, operation string, query map[string][]string) {
+	contact := contactFromQuery(query)
+
+	f.mu.Lock()
+	f.nextContactID++
+	id := strconv.Itoa(f.nextContactID)
+	contact.ID = id
+	contact.DefaultProfile = false
+	f.contacts[id] = contact
+	f.mu.Unlock()
+
+	writeReply(w, operation, "300", "success", "<contact_id>"+id+"</contact_id>")
+}
+
+// handleContactUpdate replaces the stored profile's fields, preserving the
+// account-level default_profile, which contactUpdate cannot set. An unknown
+// contact_id answers the API's generic error code 210.
+func (f *fakeNamesilo) handleContactUpdate(w http.ResponseWriter, operation string, query map[string][]string) {
+	id := firstValue(query, "contact_id")
+	contact := contactFromQuery(query)
+
+	f.mu.Lock()
+	existing, ok := f.contacts[id]
+	if ok {
+		contact.ID = id
+		contact.DefaultProfile = existing.DefaultProfile
+		f.contacts[id] = contact
+	}
+	f.mu.Unlock()
+
+	if !ok {
+		writeReply(w, operation, "210", "General error: unknown contact_id", "")
+		return
+	}
+	writeReply(w, operation, "300", "success", "")
+}
+
+// handleContactDelete removes the profile. It is idempotent: deleting a
+// profile that is already gone succeeds, the way a destroy retried after a
+// manual web-UI delete should. The "still associated with a domain" refusal is
+// injected through failWith, since it is a property of the account's
+// associations rather than of the profile.
+func (f *fakeNamesilo) handleContactDelete(w http.ResponseWriter, operation string, query map[string][]string) {
+	id := firstValue(query, "contact_id")
+
+	f.mu.Lock()
+	delete(f.contacts, id)
+	f.mu.Unlock()
+
 	writeReply(w, operation, "300", "success", "")
 }
 
