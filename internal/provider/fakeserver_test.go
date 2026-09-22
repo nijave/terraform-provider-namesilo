@@ -177,6 +177,29 @@ func (f *fakeNamesilo) dsRecordsFor(name string) []namesilo.DSRecord {
 	return append([]namesilo.DSRecord(nil), d.dsRecords...)
 }
 
+// setRoles reassigns one domain's contact associations out of band, the way a
+// change in NameSilo's web UI would. The drift tests call it from PreConfig.
+func (f *fakeNamesilo) setRoles(name string, roles namesilo.ContactRoles) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if d, ok := f.domains[name]; ok {
+		d.roles = roles
+	}
+}
+
+// rolesFor returns a copy of one domain's contact associations and whether the
+// domain exists, so a CheckDestroy can assert the destroy left them intact
+// without racing a handler.
+func (f *fakeNamesilo) rolesFor(name string) (namesilo.ContactRoles, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d, ok := f.domains[name]
+	if !ok {
+		return namesilo.ContactRoles{}, false
+	}
+	return d.roles, true
+}
+
 // failWith makes an operation always reply with the given code and detail.
 func (f *fakeNamesilo) failWith(operation, code, detail string) {
 	f.mu.Lock()
@@ -325,6 +348,8 @@ func (f *fakeNamesilo) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleContactUpdate(w, "contactUpdate", query)
 	case "contactDelete":
 		f.handleContactDelete(w, "contactDelete", query)
+	case "contactDomainAssociate":
+		f.handleContactDomainAssociate(w, "contactDomainAssociate", query)
 	default:
 		writeReply(w, operation, "400", "unsupported operation "+operation, "")
 	}
@@ -803,6 +828,40 @@ func (f *fakeNamesilo) handleContactDelete(w http.ResponseWriter, operation stri
 	delete(f.contacts, id)
 	f.mu.Unlock()
 
+	writeReply(w, operation, "300", "success", "")
+}
+
+// handleContactDomainAssociate points the request's roles at the contact IDs
+// it carries and replies 300. Absent roles are left untouched: the API has no
+// way to clear a role, so an omitted parameter means "not managed", and this
+// is what makes the resource's partial management observable in the request
+// log (§6.5). An empty value is treated as absent, matching the client, which
+// sends only non-empty roles.
+func (f *fakeNamesilo) handleContactDomainAssociate(w http.ResponseWriter, operation string, query map[string][]string) {
+	domain := firstValue(query, "domain")
+
+	f.mu.Lock()
+	d, ok := f.domains[domain]
+	if ok {
+		if v := firstValue(query, "registrant"); v != "" {
+			d.roles.Registrant = v
+		}
+		if v := firstValue(query, "administrative"); v != "" {
+			d.roles.Administrative = v
+		}
+		if v := firstValue(query, "technical"); v != "" {
+			d.roles.Technical = v
+		}
+		if v := firstValue(query, "billing"); v != "" {
+			d.roles.Billing = v
+		}
+	}
+	f.mu.Unlock()
+
+	if !ok {
+		writeReply(w, operation, "200", "Domain is not active, or does not belong to this user", "")
+		return
+	}
 	writeReply(w, operation, "300", "success", "")
 }
 
