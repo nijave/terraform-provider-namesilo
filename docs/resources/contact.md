@@ -6,7 +6,7 @@ description: |-
   Manages a contact profile — an account-level record identified by its contact_id. A domain references profiles by ID in four roles: registrant, administrative, technical, and billing. A profile is not owned by a domain, so profiles and their associations are separate resources (§6.4).
   Create makes a new profile every time an apply starts from a create; there is no name-based adoption, so importing by contact_id is the only way to take over an existing profile.
   Every attribute that describes the contact person is Sensitive. That masks the value in CLI output only: the data still lives in the state file, so treat that file as personal data. Practitioners who want stronger masking can add sensitive = true to their own contact input variables.
-  Write the canonical form the API stores: country is an uppercase two-letter code, and the optional string attributes are omitted rather than set to an empty string. On an update the provider normalizes these to the API's shape, so an existing state converges; on create there is nothing to normalize against, so a non-canonical value is rejected at plan time.
+  Write the canonical form the API stores: country is an uppercase two-letter code, and the optional string attributes are omitted rather than set to an empty string. Non-canonical values are rejected at validate time, both when creating and when updating.
   Destroying the resource deletes the profile. The API refuses to delete a profile still associated with a domain, and the account's default profile cannot be deleted; the error is surfaced unchanged, and the fix is to reassign the domain's contacts first — which is what the dependency graph expresses when a domain's contacts reference this resource.
 ---
 
@@ -18,7 +18,7 @@ Create makes a new profile every time an apply starts from a create; there is no
 
 Every attribute that describes the contact person is `Sensitive`. That masks the value in CLI output only: the data still lives in the state file, so treat that file as personal data. Practitioners who want stronger masking can add `sensitive = true` to their own contact input variables.
 
-Write the canonical form the API stores: `country` is an uppercase two-letter code, and the optional string attributes are omitted rather than set to an empty string. On an update the provider normalizes these to the API's shape, so an existing state converges; on create there is nothing to normalize against, so a non-canonical value is rejected at plan time.
+Write the canonical form the API stores: `country` is an uppercase two-letter code, and the optional string attributes are omitted rather than set to an empty string. Non-canonical values are rejected at validate time, both when creating and when updating.
 
 Destroying the resource deletes the profile. The API refuses to delete a profile still associated with a domain, and the account's default profile cannot be deleted; the error is surfaced unchanged, and the fix is to reassign the domain's contacts first — which is what the dependency graph expresses when a domain's contacts reference this resource.
 
@@ -49,7 +49,7 @@ output "contact_id" {
 
 - `address` (String, Sensitive) The registrant's street address.
 - `city` (String, Sensitive) The registrant's city.
-- `country` (String, Sensitive) The registrant's country as an ISO 3166-1 alpha-2 code, e.g. `US` or `GB`. Must be exactly two uppercase letters; any other case is rejected at plan time. Normalization to uppercase applies on update, not on create: an update against existing state converges, while a create needs the canonical uppercase form.
+- `country` (String, Sensitive) The registrant's country as an ISO 3166-1 alpha-2 code, e.g. `US` or `GB`. Exactly two uppercase letters: a lowercase or other-case value is rejected at validate time, and no case correction is applied.
 - `email` (String, Sensitive) The registrant's email address. NameSilo sends contact verification and renewal notices here.
 - `first_name` (String, Sensitive) The registrant's first name.
 - `last_name` (String, Sensitive) The registrant's last name.

@@ -93,10 +93,9 @@ func (r *contactResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"data. Practitioners who want stronger masking can add `sensitive = true` to their own " +
 			"contact input variables.\n\n" +
 			"Write the canonical form the API stores: `country` is an uppercase two-letter code, and " +
-			"the optional string attributes are omitted rather than set to an empty string. On an " +
-			"update the provider normalizes these to the API's shape, so an existing state converges; " +
-			"on create there is nothing to normalize against, so a non-canonical value is rejected at " +
-			"plan time.\n\n" +
+			"the optional string attributes are omitted rather than set to an empty string. " +
+			"Non-canonical values are rejected at validate time, both when creating and when " +
+			"updating.\n\n" +
 			"Destroying the resource deletes the profile. The API refuses to delete a profile still " +
 			"associated with a domain, and the account's default profile cannot be deleted; the error " +
 			"is surfaced unchanged, and the fix is to reassign the domain's contacts first — which is " +
@@ -157,9 +156,8 @@ func (r *contactResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 						"use an uppercase two-letter ISO 3166-1 alpha-2 country code, e.g. US or GB"),
 				},
 				MarkdownDescription: "The registrant's country as an ISO 3166-1 alpha-2 code, e.g. `US` " +
-					"or `GB`. Must be exactly two uppercase letters; any other case is rejected at plan " +
-					"time. Normalization to uppercase applies on update, not on create: an update " +
-					"against existing state converges, while a create needs the canonical uppercase form.",
+					"or `GB`. Exactly two uppercase letters: a lowercase or other-case value is " +
+					"rejected at validate time, and no case correction is applied.",
 			},
 			"email": schema.StringAttribute{
 				Required:   true,
