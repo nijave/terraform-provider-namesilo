@@ -87,8 +87,15 @@ func (p *namesiloProvider) Resources(_ context.Context) []func() resource.Resour
 	}
 }
 
-// DataSources returns nothing yet. The data source tasks append their
-// constructors here.
+// DataSources returns the provider's data sources. Every data source task
+// appends its constructor here.
 func (p *namesiloProvider) DataSources(_ context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{}
+	return []func() datasource.DataSource{
+		NewNameserversDataSource,
+		NewDNSSecRecordsDataSource,
+		NewPrivacyDataSource,
+		NewContactsDataSource,
+		NewDomainDataSource,
+		NewDomainsDataSource,
+	}
 }

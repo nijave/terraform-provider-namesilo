@@ -42,6 +42,13 @@ type fakeNamesilo struct {
 	// by mu like the domains.
 	contacts map[string]namesilo.Contact
 
+	// ignorePaging makes listDomains answer every request with page 1
+	// regardless of the page parameter, the way an API that ignores the
+	// paging parameters would. The domains paging-guard test turns it on to
+	// drive the client's duplicate-page guard and the data source's
+	// incomplete-list warning (§7).
+	ignorePaging bool
+
 	// nextContactID is the contactAdd ID sequence: the first assigned ID is
 	// 1001.
 	nextContactID int
@@ -57,6 +64,11 @@ type fakeDomain struct {
 	locked    bool
 	private   bool
 	autoRenew bool
+
+	// forwardURL and forwardType are the domain's forwarding fields, exposed
+	// exactly as the API sends them: "N/A" when forwarding is off (§7).
+	forwardURL  string
+	forwardType string
 
 	nameservers []string
 	dsRecords   []namesilo.DSRecord
@@ -101,9 +113,31 @@ func (f *fakeNamesilo) addDomain(name string) *fakeDomain {
 	if _, ok := f.domains[name]; ok {
 		panic("fake: addDomain called twice for " + name)
 	}
-	d := &fakeDomain{status: "active"}
+	// forwardURL and forwardType default to the API's "no forwarding" value,
+	// exactly what a plain domain replies with (§7).
+	d := &fakeDomain{status: "active", forwardURL: "N/A", forwardType: "N/A"}
 	f.domains[name] = d
 	return d
+}
+
+// setIgnorePaging flips the listDomains knob that answers every request with
+// page 1 regardless of the page parameter.
+func (f *fakeNamesilo) setIgnorePaging(ignore bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ignorePaging = ignore
+}
+
+// setForward rewrites one domain's forwarding fields out of band, the way a
+// change in NameSilo's web UI would. The domain data source test calls it from
+// PreConfig to prove forward_url and forward_type pass through unchanged.
+func (f *fakeNamesilo) setForward(name, forwardURL, forwardType string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if d, ok := f.domains[name]; ok {
+		d.forwardURL = forwardURL
+		d.forwardType = forwardType
+	}
 }
 
 // setNameservers mutates one domain's nameservers out of band, the way a
@@ -350,6 +384,8 @@ func (f *fakeNamesilo) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleContactDelete(w, "contactDelete", query)
 	case "contactDomainAssociate":
 		f.handleContactDomainAssociate(w, "contactDomainAssociate", query)
+	case "listDomains":
+		f.handleListDomains(w, "listDomains", query)
 	default:
 		writeReply(w, operation, "400", "unsupported operation "+operation, "")
 	}
@@ -381,8 +417,8 @@ func (f *fakeNamesilo) handleGetDomainInfo(w http.ResponseWriter, operation, dom
 	b.WriteString("<traffic_type></traffic_type>")
 	b.WriteString("<email_verification_required>" + yesNo(false) + "</email_verification_required>")
 	b.WriteString("<portfolio></portfolio>")
-	b.WriteString("<forward_url></forward_url>")
-	b.WriteString("<forward_type></forward_type>")
+	b.WriteString("<forward_url>" + xmlEscape(d.forwardURL) + "</forward_url>")
+	b.WriteString("<forward_type>" + xmlEscape(d.forwardType) + "</forward_type>")
 	b.WriteString("<nameservers>")
 	for i, ns := range d.nameservers {
 		b.WriteString(`<nameserver position="` + strconv.Itoa(i+1) + `">` + xmlEscape(ns) + "</nameserver>")
@@ -394,6 +430,60 @@ func (f *fakeNamesilo) handleGetDomainInfo(w http.ResponseWriter, operation, dom
 	b.WriteString("<technical>" + xmlEscape(d.roles.Technical) + "</technical>")
 	b.WriteString("<billing>" + xmlEscape(d.roles.Billing) + "</billing>")
 	b.WriteString("</contact_ids>")
+
+	writeReply(w, operation, "300", "success", b.String())
+}
+
+// handleListDomains pages the account's domains: page and pageSize slice the
+// fake's domain set, sorted by name so the pages are deterministic, and the
+// reply echoes the pager element the client's loop is driven by. When
+// ignorePaging is set, every request is answered with page 1 regardless of the
+// page parameter, the way a broken API behaves: the client sees a repeated
+// page, stops with Truncated set, and the data source warns that the list may
+// be incomplete (§7, §4 invariant 13).
+func (f *fakeNamesilo) handleListDomains(w http.ResponseWriter, operation string, query map[string][]string) {
+	page, err := strconv.ParseInt(firstValue(query, "page"), 10, 64)
+	if err != nil || page < 1 {
+		page = 1
+	}
+	pageSize, err := strconv.ParseInt(firstValue(query, "pageSize"), 10, 64)
+	if err != nil || pageSize < 1 {
+		pageSize = 100
+	}
+
+	f.mu.Lock()
+	names := make([]string, 0, len(f.domains))
+	for name := range f.domains {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	total := int64(len(names))
+	if f.ignorePaging {
+		page = 1
+	}
+	rows := make([]namesilo.DomainSummary, 0, pageSize)
+	for i := (page - 1) * pageSize; i < page*pageSize && i < total; i++ {
+		d := f.domains[names[i]]
+		rows = append(rows, namesilo.DomainSummary{
+			Name:    names[i],
+			Created: d.created,
+			Expires: d.expires,
+		})
+	}
+	f.mu.Unlock()
+
+	var b strings.Builder
+	b.WriteString("<domains>")
+	for _, row := range rows {
+		b.WriteString(`<domain created="` + xmlEscape(row.Created) +
+			`" expires="` + xmlEscape(row.Expires) + `">` + xmlEscape(row.Name) + "</domain>")
+	}
+	b.WriteString("</domains>")
+	b.WriteString("<pager>")
+	b.WriteString("<total>" + strconv.FormatInt(total, 10) + "</total>")
+	b.WriteString("<pageSize>" + strconv.FormatInt(pageSize, 10) + "</pageSize>")
+	b.WriteString("<page>" + strconv.FormatInt(page, 10) + "</page>")
+	b.WriteString("</pager>")
 
 	writeReply(w, operation, "300", "success", b.String())
 }

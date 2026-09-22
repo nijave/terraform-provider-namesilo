@@ -45,7 +45,14 @@ var expectedResourceTypes = []string{
 
 // expectedDataSourceTypes lists every data source type the harness tests must
 // cover. The data source tasks append their type names here.
-var expectedDataSourceTypes []string
+var expectedDataSourceTypes = []string{
+	"namesilo_nameservers",
+	"namesilo_dnssec_records",
+	"namesilo_privacy",
+	"namesilo_contacts",
+	"namesilo_domain",
+	"namesilo_domains",
+}
 
 var tofuPath string
 
