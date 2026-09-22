@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<namesilo><request><operation>dnsSecListRecords</operation><ip>192.0.2.1</ip></request><reply><code>300</code><detail>You have not created any DS records for this domain yet.</detail></reply></namesilo>

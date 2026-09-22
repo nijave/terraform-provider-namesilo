@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<namesilo><request><operation>dnsSecAddRecord</operation><ip>192.0.2.1</ip></request><reply><code>210</code><detail>SRS Error - Unable to update DS record: Parameter value policy error</detail></reply></namesilo>

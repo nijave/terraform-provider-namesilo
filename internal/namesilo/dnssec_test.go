@@ -12,39 +12,23 @@ import (
 	"testing"
 )
 
-// dnsSecListTwoFixture is the §8.3 shape: two ds_record elements whose
-// children spell the fields the way the response does, full-word algorithm and
-// camelCase keyTag and digestType. The first digest is uppercase on purpose, so
-// the rawness contract is visible: the client returns the digest the API sent
-// and the provider layer normalizes it.
-const dnsSecListTwoFixture = `<namesilo><reply>
-  <code>300</code>
-  <detail>success</detail>
-  <ds_record>
-    <keyTag>12345</keyTag>
-    <algorithm>8</algorithm>
-    <digestType>2</digestType>
-    <digest>A94F2C81E0D5B7A3F1C6D8E2B4A6C8D0E2F4A6C8D0E2F4A6C8D0E2F4A6C8D0E2</digest>
-  </ds_record>
-  <ds_record>
-    <keyTag>65535</keyTag>
-    <algorithm>13</algorithm>
-    <digestType>1</digestType>
-    <digest>0f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6</digest>
-  </ds_record>
-</reply></namesilo>`
+// dnsSecFixtureDigest is the digest the captured dnsSecListRecords reply
+// carries. It is uppercase, which makes the rawness contract visible: the
+// client returns the digest the API sent and the provider layer normalizes it.
+const dnsSecFixtureDigest = "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"
 
 func TestListDSRecords(t *testing.T) {
+	body := loadFixture(t, "dnsSecListRecords-with.xml")
 	requests := make(chan capturedRequest, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests <- capturedRequest{path: r.URL.Path, query: r.URL.Query()}
 		w.Header().Set("Content-Type", "text/xml")
-		fmt.Fprint(w, dnsSecListTwoFixture)
+		fmt.Fprint(w, body)
 	}))
 	defer srv.Close()
 	c := NewClient(srv.URL, "test-key", "test")
 
-	records, err := c.ListDSRecords(context.Background(), "example.com")
+	records, err := c.ListDSRecords(context.Background(), fixtureDomain)
 	if err != nil {
 		t.Fatalf("ListDSRecords: %v", err)
 	}
@@ -53,13 +37,12 @@ func TestListDSRecords(t *testing.T) {
 	if got.path != "/dnsSecListRecords" {
 		t.Errorf("path = %q, want %q", got.path, "/dnsSecListRecords")
 	}
-	if v := got.query.Get("domain"); v != "example.com" {
-		t.Errorf("domain = %q, want %q", v, "example.com")
+	if v := got.query.Get("domain"); v != fixtureDomain {
+		t.Errorf("domain = %q, want %q", v, fixtureDomain)
 	}
 
 	want := []DSRecord{
-		{KeyTag: 12345, Algorithm: 8, DigestType: 2, Digest: "A94F2C81E0D5B7A3F1C6D8E2B4A6C8D0E2F4A6C8D0E2F4A6C8D0E2F4A6C8D0E2"},
-		{KeyTag: 65535, Algorithm: 13, DigestType: 1, Digest: "0f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6"},
+		{KeyTag: 12345, Algorithm: 13, DigestType: 2, Digest: dnsSecFixtureDigest},
 	}
 	if len(records) != len(want) {
 		t.Fatalf("records = %+v, want %+v", records, want)
@@ -71,62 +54,41 @@ func TestListDSRecords(t *testing.T) {
 	}
 }
 
-// dnsSecListRecordsLiveGolden is the exact reply the real API returned for a
-// domain with one DS record, copied verbatim from the live capture. It pins the
-// wire shape the fake used to compensate for: camelCase keyTag and digestType
-// on the reply, full-word algorithm.
-const dnsSecListRecordsLiveGolden = `<?xml version="1.0"?>
-<namesilo><request><operation>dnsSecListRecords</operation><ip>203.0.113.7</ip></request><reply><code>300</code><detail>success</detail><ds_record><keyTag>12345</keyTag><algorithm>13</algorithm><digestType>2</digestType><digest>ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB</digest></ds_record></reply></namesilo>`
-
-// TestListDSRecordsLiveGolden decodes the captured real reply as a raw-string
-// golden. The table is deliberately one row today: it exists to make the
-// verified wire shape an explicit test case, so a future edit that reverts the
-// tags to snake_case fails here rather than only against the live API.
+// TestListDSRecordsLiveGolden decodes the captured reply for a domain with one
+// DS record and asserts every field. It pins the wire shape the fake used to
+// compensate for: camelCase keyTag and digestType on the reply, full-word
+// algorithm.
 func TestListDSRecordsLiveGolden(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		body string
-		want []DSRecord
-	}{
-		{
-			name: "camelCase reply elements",
-			body: dnsSecListRecordsLiveGolden,
-			want: []DSRecord{{
-				KeyTag:     12345,
-				Algorithm:  13,
-				DigestType: 2,
-				Digest:     "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
-			}},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			srv := serveXML(t, tc.body)
-			c := NewClient(srv.URL, "test-key", "test")
+	srv := serveXML(t, loadFixture(t, "dnsSecListRecords-with.xml"))
+	c := NewClient(srv.URL, "test-key", "test")
 
-			records, err := c.ListDSRecords(context.Background(), "example.com")
-			if err != nil {
-				t.Fatalf("ListDSRecords: %v", err)
-			}
-			if len(records) != len(tc.want) {
-				t.Fatalf("records = %+v, want %+v", records, tc.want)
-			}
-			for i := range tc.want {
-				if records[i] != tc.want[i] {
-					t.Errorf("records[%d] = %+v, want %+v", i, records[i], tc.want[i])
-				}
-			}
-		})
+	records, err := c.ListDSRecords(context.Background(), fixtureDomain)
+	if err != nil {
+		t.Fatalf("ListDSRecords: %v", err)
+	}
+	want := []DSRecord{{
+		KeyTag:     12345,
+		Algorithm:  13,
+		DigestType: 2,
+		Digest:     dnsSecFixtureDigest,
+	}}
+	if len(records) != len(want) {
+		t.Fatalf("records = %+v, want %+v", records, want)
+	}
+	for i := range want {
+		if records[i] != want[i] {
+			t.Errorf("records[%d] = %+v, want %+v", i, records[i], want[i])
+		}
 	}
 }
 
 func TestListDSRecordsEmpty(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeReply(w, "300", "success")
-	}))
-	defer srv.Close()
+	// The captured unsigned-domain reply: code 300 with a detail saying no DS
+	// records exist, and no <ds_record> element at all.
+	srv := serveXML(t, loadFixture(t, "dnsSecListRecords-empty.xml"))
 	c := NewClient(srv.URL, "test-key", "test")
 
-	records, err := c.ListDSRecords(context.Background(), "example.com")
+	records, err := c.ListDSRecords(context.Background(), fixtureDomain)
 	if err != nil {
 		t.Fatalf("ListDSRecords: %v", err)
 	}
@@ -139,6 +101,8 @@ func TestListDSRecordsEmpty(t *testing.T) {
 }
 
 func TestListDSRecordsDropsEmptyElement(t *testing.T) {
+	// Synthetic shape fixture: a bare <ds_record/> is how the API spells
+	// "nothing", and the capture does not contain one, so these stay inline.
 	t.Run("bare element alone", func(t *testing.T) {
 		srv := serveXML(t, `<namesilo><reply><code>300</code><detail>success</detail><ds_record/></reply></namesilo>`)
 		c := NewClient(srv.URL, "test-key", "test")
@@ -192,15 +156,17 @@ func TestDeleteDSRecordUppercasesDigest(t *testing.T) {
 	const lower = "a94f2c81e0d5b7a3f1c6d8e2b4a6c8d0e2f4a6c8d0e2f4a6c8d0e2f4a6c8d0e2"
 	record := DSRecord{KeyTag: 12345, Algorithm: 8, DigestType: 2, Digest: lower}
 
+	body := loadFixture(t, "dnsSecDeleteRecord.xml")
 	requests := make(chan capturedRequest, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests <- capturedRequest{path: r.URL.Path, query: r.URL.Query()}
-		writeReply(w, "300", "success")
+		w.Header().Set("Content-Type", "text/xml")
+		fmt.Fprint(w, body)
 	}))
 	defer srv.Close()
 	c := NewClient(srv.URL, "test-key", "test")
 
-	if err := c.DeleteDSRecord(context.Background(), "example.com", record); err != nil {
+	if err := c.DeleteDSRecord(context.Background(), fixtureDomain, record); err != nil {
 		t.Fatalf("DeleteDSRecord: %v", err)
 	}
 
@@ -222,27 +188,29 @@ func TestDeleteDSRecordUppercasesDigest(t *testing.T) {
 // and the delete takes effect anyway, so the code is treated as success. The
 // reconcile deletes records moments after adding them, so this is routine.
 func TestDeleteDSRecordToleratesPending210(t *testing.T) {
-	const body = `<namesilo><reply><code>210</code><detail>There are no active records specified for deletion</detail></reply></namesilo>`
-	srv := serveXML(t, body)
+	// The captured reply for deleting a still-pending record: code 210 "There
+	// are no active records specified for deletion". The delete takes effect
+	// anyway, so the code is treated as success.
+	srv := serveXML(t, loadFixture(t, "dnsSecDeleteRecord-immediate.xml"))
 	c := NewClient(srv.URL, "test-key", "test")
 
 	record := DSRecord{KeyTag: 12345, Algorithm: 8, DigestType: 2, Digest: "A94F2C81E0D5B7A3F1C6D8E2B4A6C8D0E2F4A6C8D0E2F4A6C8D0E2F4A6C8D0E2"}
-	if err := c.DeleteDSRecord(context.Background(), "example.com", record); err != nil {
+	if err := c.DeleteDSRecord(context.Background(), fixtureDomain, record); err != nil {
 		t.Fatalf("DeleteDSRecord with a pending-record 210: %v, want success", err)
 	}
 }
 
 // TestPending210IsPerOperation pins that the 210 tolerance belongs to
 // dnsSecDeleteRecord alone: the same code from another operation is still an
-// error, because the classification is per operation (210 also means a general
-// error, such as an unknown parameter).
+// error, because the classification is per operation. The captured duplicate
+// add is the real 210 for dnsSecAddRecord (a duplicate DS add is a policy
+// error, not a 25x tolerance code).
 func TestPending210IsPerOperation(t *testing.T) {
-	const body = `<namesilo><reply><code>210</code><detail>General error</detail></reply></namesilo>`
-	srv := serveXML(t, body)
+	srv := serveXML(t, loadFixture(t, "dnsSecAddRecord-duplicate.xml"))
 	c := NewClient(srv.URL, "test-key", "test")
 
 	record := DSRecord{KeyTag: 12345, Algorithm: 8, DigestType: 2, Digest: "A94F2C81E0D5B7A3F1C6D8E2B4A6C8D0E2F4A6C8D0E2F4A6C8D0E2F4A6C8D0E2"}
-	err := c.AddDSRecord(context.Background(), "example.com", record)
+	err := c.AddDSRecord(context.Background(), fixtureDomain, record)
 	if err == nil {
 		t.Fatal("AddDSRecord with code 210: nil error, want *APIError")
 	}
@@ -256,9 +224,14 @@ func TestPending210IsPerOperation(t *testing.T) {
 	if apiErr.Operation != "dnsSecAddRecord" {
 		t.Errorf("Operation = %q, want %q", apiErr.Operation, "dnsSecAddRecord")
 	}
+	if !strings.Contains(apiErr.Detail, "Parameter value policy error") {
+		t.Errorf("Detail = %q, want the captured policy-error detail", apiErr.Detail)
+	}
 }
 
 func TestListDSRecordsMalformedInt(t *testing.T) {
+	// Synthetic fault injection: a non-integer keyTag, which the capture does
+	// not contain.
 	const digest = "B1C2D3E4F5A6B7C8D9E0F1A2B3C4D5E6F7A8B9C0D1E2F3A4B5C6D7E8F9A0B1C2"
 	const fixture = `<namesilo><reply><code>300</code><detail>success</detail>
 		<ds_record>
@@ -306,17 +279,19 @@ func TestAddDeleteDSRecordRequests(t *testing.T) {
 		call func(c *Client) error
 	}{
 		{name: "dnsSecAddRecord", call: func(c *Client) error {
-			return c.AddDSRecord(context.Background(), "example.com", record)
+			return c.AddDSRecord(context.Background(), fixtureDomain, record)
 		}},
 		{name: "dnsSecDeleteRecord", call: func(c *Client) error {
-			return c.DeleteDSRecord(context.Background(), "example.com", record)
+			return c.DeleteDSRecord(context.Background(), fixtureDomain, record)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			body := loadFixture(t, tc.name+".xml")
 			requests := make(chan capturedRequest, 1)
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests <- capturedRequest{path: r.URL.Path, query: r.URL.Query()}
-				writeReply(w, "300", "success")
+				w.Header().Set("Content-Type", "text/xml")
+				fmt.Fprint(w, body)
 			}))
 			defer srv.Close()
 			c := NewClient(srv.URL, "test-key", "test")
@@ -330,7 +305,7 @@ func TestAddDeleteDSRecordRequests(t *testing.T) {
 				t.Errorf("path = %q, want %q", got.path, "/"+tc.name)
 			}
 			wantParams := map[string]string{
-				"domain":     "example.com",
+				"domain":     fixtureDomain,
 				"digest":     record.Digest,
 				"keyTag":     "12345",
 				"digestType": "2",

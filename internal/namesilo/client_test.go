@@ -36,6 +36,8 @@ func TestCallRequestConstruction(t *testing.T) {
 			query:     r.URL.Query(),
 			userAgent: r.Header.Get("User-Agent"),
 		}
+		// Synthetic minimal success envelope: this test asserts the request,
+		// not a captured reply shape, so it is not fixture-backed.
 		writeReply(w, "300", "success")
 	}))
 	defer srv.Close()
@@ -78,23 +80,28 @@ func TestCallRequestConstruction(t *testing.T) {
 }
 
 func TestReplyCodeClassification(t *testing.T) {
+	// Cases with a fixture are served the real captured reply for that
+	// operation; cases without one are a synthetic envelope for a code or
+	// fault the corpus does not cover (301/302, the toggle codes with no
+	// captured already-in-state reply, and the foreign-operation checks).
 	cases := []struct {
 		name      string
 		operation string
+		fixture   string
 		code      string
 		detail    string
 		wantErr   bool
 	}{
-		{name: "300 is success", operation: "probe", code: "300", detail: "success"},
+		{name: "300 is success", operation: "addAutoRenewal", fixture: "addAutoRenewal.xml"},
 		{name: "301 is success", operation: "probe", code: "301", detail: "success"},
 		{name: "302 is success", operation: "probe", code: "302", detail: "success"},
-		{name: "250 succeeds for addAutoRenewal", operation: "addAutoRenewal", code: "250", detail: "already set to AutoRenew"},
+		{name: "250 succeeds for addAutoRenewal", operation: "addAutoRenewal", fixture: "addAutoRenewal-duplicate.xml"},
 		{name: "251 succeeds for removeAutoRenewal", operation: "removeAutoRenewal", code: "251", detail: "already set not to AutoRenew"},
-		{name: "252 succeeds for domainLock", operation: "domainLock", code: "252", detail: "already locked"},
+		{name: "252 succeeds for domainLock", operation: "domainLock", fixture: "domainLock-duplicate.xml"},
 		{name: "253 succeeds for domainUnlock", operation: "domainUnlock", code: "253", detail: "already unlocked"},
-		{name: "255 succeeds for addPrivacy", operation: "addPrivacy", code: "255", detail: "already private"},
+		{name: "255 succeeds for addPrivacy", operation: "addPrivacy", fixture: "addPrivacy-duplicate.xml"},
 		{name: "256 succeeds for removePrivacy", operation: "removePrivacy", code: "256", detail: "already not private"},
-		{name: "210 succeeds for dnsSecDeleteRecord", operation: "dnsSecDeleteRecord", code: "210", detail: "There are no active records specified for deletion"},
+		{name: "210 succeeds for dnsSecDeleteRecord", operation: "dnsSecDeleteRecord", fixture: "dnsSecDeleteRecord-immediate.xml"},
 		{name: "250 from probe is an error", operation: "probe", code: "250", detail: "already set to AutoRenew", wantErr: true},
 		{name: "251 from probe is an error", operation: "probe", code: "251", detail: "already set not to AutoRenew", wantErr: true},
 		{name: "252 from probe is an error", operation: "probe", code: "252", detail: "already locked", wantErr: true},
@@ -109,7 +116,16 @@ func TestReplyCodeClassification(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			body := ""
+			if tc.fixture != "" {
+				body = loadFixture(t, tc.fixture)
+			}
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if body != "" {
+					w.Header().Set("Content-Type", "text/xml")
+					fmt.Fprint(w, body)
+					return
+				}
 				writeReply(w, tc.code, tc.detail)
 			}))
 			defer srv.Close()
@@ -143,6 +159,8 @@ func TestReplyCodeClassification(t *testing.T) {
 }
 
 func TestReplyMissingCode(t *testing.T) {
+	// Synthetic fault injection: a reply with no <code> element. Not a
+	// captured reply, so it stays inline.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "<namesilo><reply><detail>success</detail></reply></namesilo>")
 	}))
@@ -246,6 +264,7 @@ func TestCallRetriesThrottled503(t *testing.T) {
 }
 
 func TestHTTPErrors(t *testing.T) {
+	// Synthetic fault injection: an HTTP 500 with no XML body.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -268,6 +287,7 @@ func TestHTTPErrors(t *testing.T) {
 }
 
 func TestNonXMLBody(t *testing.T) {
+	// Synthetic fault injection: truncated XML that is not a reply at all.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "<namesilo><reply><code>300")
 	}))
@@ -285,6 +305,9 @@ func TestNonXMLBody(t *testing.T) {
 
 func TestErrorsNeverContainTheAPIKey(t *testing.T) {
 	const apiKey = "super-secret-api-key"
+	// Synthetic fault shapes: HTTP 500, truncated XML, a code with no
+	// captured reply (110), and a transport failure. None is a captured
+	// reply, so they stay inline.
 	shapes := []struct {
 		name    string
 		handler http.HandlerFunc

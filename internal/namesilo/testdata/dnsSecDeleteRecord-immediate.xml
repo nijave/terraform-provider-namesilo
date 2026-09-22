@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<namesilo><request><operation>dnsSecDeleteRecord</operation><ip>192.0.2.1</ip></request><reply><code>210</code><detail>There are no active records specified for deletion</detail></reply></namesilo>

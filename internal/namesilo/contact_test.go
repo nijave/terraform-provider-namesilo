@@ -12,102 +12,49 @@ import (
 	"testing"
 )
 
-// contactSuccessReply is the smallest success envelope the write operations
-// accept.
+// contactSuccessReply is a synthetic minimal success envelope. The corpus has
+// no captured empty-contactList reply, and the "success without contact_id"
+// case is fault injection, so those two assertions stay inline.
 const contactSuccessReply = `<namesilo><reply><code>300</code><detail>success</detail></reply></namesilo>`
 
-// contactAddReplyFixture is a contactAdd success whose reply carries the new
-// profile's contact_id.
-const contactAddReplyFixture = `<namesilo><reply><code>300</code><detail>success</detail><contact_id>c42</contact_id></reply></namesilo>`
+// wantDefaultContact is what contactList-single.xml and contactList-all.xml
+// parse to: the account default profile, sanitized. company, address2, and
+// fax arrive as empty elements and decode to empty strings.
+var wantDefaultContact = Contact{
+	ID:             "29145691",
+	DefaultProfile: true,
+	Nickname:       "Default",
+	FirstName:      "Alex",
+	LastName:       "Morgan",
+	Address:        "4187 Maple Street",
+	City:           "Springfield",
+	State:          "IL",
+	Zip:            "62704",
+	Country:        "US",
+	Email:          "contact@example.com",
+	Phone:          "+15125550100",
+}
 
-// contactFullFixture is one contactList profile with every field set, in the
-// shape NameSilo's own contactList replies have (§8.4): the reply uses the
-// full snake_case element names, unlike the request's short parameter names.
-const contactFullFixture = `<namesilo><reply>
-  <code>300</code>
-  <detail>success</detail>
-  <contact>
-    <contact_id>c1</contact_id>
-    <default_profile>1</default_profile>
-    <nickname>home</nickname>
-    <company>Example Co</company>
-    <first_name>Ada</first_name>
-    <last_name>Lovelace</last_name>
-    <address>1 Main St</address>
-    <address2>Suite 2</address2>
-    <city>Exampletown</city>
-    <state>CA</state>
-    <zip>90210</zip>
-    <country>US</country>
-    <email>ada@example.net</email>
-    <phone>1-555-0100</phone>
-    <fax>1-555-0101</fax>
-    <us_nexus_category>C11</us_nexus_category>
-    <us_application_purpose>P1</us_application_purpose>
-    <ca_legal_form>CORP</ca_legal_form>
-    <ca_language>EN</ca_language>
-    <ca_agreement_version>1.0</ca_agreement_version>
-    <ca_whois_display>PRIVATE</ca_whois_display>
-    <eu_citizenship_country>DE</eu_citizenship_country>
-  </contact>
-</reply></namesilo>`
+// wantCreatedContact is what contactList-created.xml parses to: a created test
+// profile that is not the account default.
+var wantCreatedContact = Contact{
+	ID:             "29145829",
+	DefaultProfile: false,
+	Nickname:       "tf-fixture-probe",
+	FirstName:      "Terraform",
+	LastName:       "Acceptance",
+	Address:        "1 Test Way",
+	City:           "Testville",
+	State:          "TX",
+	Zip:            "73301",
+	Country:        "US",
+	Email:          "terraform-test@example.com",
+	Phone:          "+1 512 555 0100",
+}
 
-// contactListTwoFixture is two profiles: the "every profile" reply for an
-// account with two of them.
-const contactListTwoFixture = `<namesilo><reply>
-  <code>300</code>
-  <detail>success</detail>
-  <contact>
-    <contact_id>c1</contact_id>
-    <default_profile>1</default_profile>
-    <nickname>home</nickname>
-    <company>Example Co</company>
-    <first_name>Ada</first_name>
-    <last_name>Lovelace</last_name>
-    <address>1 Main St</address>
-    <address2>Suite 2</address2>
-    <city>Exampletown</city>
-    <state>CA</state>
-    <zip>90210</zip>
-    <country>US</country>
-    <email>ada@example.net</email>
-    <phone>1-555-0100</phone>
-    <fax>1-555-0101</fax>
-    <us_nexus_category>C11</us_nexus_category>
-    <us_application_purpose>P1</us_application_purpose>
-    <ca_legal_form>CORP</ca_legal_form>
-    <ca_language>EN</ca_language>
-    <ca_agreement_version>1.0</ca_agreement_version>
-    <ca_whois_display>PRIVATE</ca_whois_display>
-    <eu_citizenship_country>DE</eu_citizenship_country>
-  </contact>
-  <contact>
-    <contact_id>c2</contact_id>
-    <default_profile>0</default_profile>
-    <nickname>work</nickname>
-    <company/>
-    <first_name>Grace</first_name>
-    <last_name>Hopper</last_name>
-    <address>9 Fleet St</address>
-    <address2/>
-    <city>Arlington</city>
-    <state>VA</state>
-    <zip>22201</zip>
-    <country>US</country>
-    <email>grace@example.net</email>
-    <phone>1-555-0199</phone>
-    <fax/>
-    <us_nexus_category/>
-    <us_application_purpose/>
-    <ca_legal_form/>
-    <ca_language/>
-    <ca_agreement_version/>
-    <ca_whois_display/>
-    <eu_citizenship_country/>
-  </contact>
-</reply></namesilo>`
-
-// wantFullContact is what contactFullFixture's profile parses to.
+// wantFullContact is the complete Contact the request-construction tests send,
+// with every field set (including the country-specific ones the captured
+// profiles leave unset). It exercises the request spelling, not a reply shape.
 var wantFullContact = Contact{
 	ID:                   "c1",
 	DefaultProfile:       true,
@@ -131,23 +78,6 @@ var wantFullContact = Contact{
 	CaAgreementVersion:   "1.0",
 	CaWhoisDisplay:       "PRIVATE",
 	EuCitizenshipCountry: "DE",
-}
-
-// wantSecondContact is what the second profile in contactListTwoFixture parses
-// to: the empty elements (<cp/>, <ad2/>, and so on) are empty strings, not
-// errors.
-var wantSecondContact = Contact{
-	ID:        "c2",
-	Nickname:  "work",
-	FirstName: "Grace",
-	LastName:  "Hopper",
-	Address:   "9 Fleet St",
-	City:      "Arlington",
-	State:     "VA",
-	Zip:       "22201",
-	Country:   "US",
-	Email:     "grace@example.net",
-	Phone:     "1-555-0199",
 }
 
 // captureRequest runs run against a fresh client pointed at a server serving
@@ -219,11 +149,11 @@ var fullContactParams = map[string]string{
 	"eucs": "DE",
 }
 
-// assertContactFields compares a parsed profile with the full fixture.
-func assertContactFields(t *testing.T, got Contact) {
+// assertContactEquals compares a parsed profile with the wanted one.
+func assertContactEquals(t *testing.T, got, want Contact) {
 	t.Helper()
-	if got != wantFullContact {
-		t.Errorf("contact = %+v, want %+v", got, wantFullContact)
+	if got != want {
+		t.Errorf("contact = %+v, want %+v", got, want)
 	}
 }
 
@@ -231,7 +161,7 @@ func TestContactAddUpdateDeleteRequests(t *testing.T) {
 	full := wantFullContact
 
 	t.Run("contactAdd sends every field with the short API names", func(t *testing.T) {
-		req := captureRequest(t, contactAddReplyFixture, func(c *Client) error {
+		req := captureRequest(t, loadFixture(t, "contactAdd.xml"), func(c *Client) error {
 			_, err := c.AddContact(context.Background(), full)
 			return err
 		})
@@ -263,7 +193,7 @@ func TestContactAddUpdateDeleteRequests(t *testing.T) {
 			"nn": "", "cp": "",
 			"usnc": "", "usap": "", "calf": "", "caln": "", "caag": "", "cawd": "", "eucs": "",
 		}
-		req := captureRequest(t, contactAddReplyFixture, func(c *Client) error {
+		req := captureRequest(t, loadFixture(t, "contactAdd.xml"), func(c *Client) error {
 			_, err := c.AddContact(context.Background(), bare)
 			return err
 		})
@@ -277,7 +207,7 @@ func TestContactAddUpdateDeleteRequests(t *testing.T) {
 		for k, v := range fullContactParams {
 			want[k] = v
 		}
-		req := captureRequest(t, contactSuccessReply, func(c *Client) error {
+		req := captureRequest(t, loadFixture(t, "contactUpdate.xml"), func(c *Client) error {
 			return c.UpdateContact(context.Background(), updating)
 		})
 		if req.path != "/contactUpdate" {
@@ -287,7 +217,7 @@ func TestContactAddUpdateDeleteRequests(t *testing.T) {
 	})
 
 	t.Run("contactDelete sends only contact_id", func(t *testing.T) {
-		req := captureRequest(t, contactSuccessReply, func(c *Client) error {
+		req := captureRequest(t, loadFixture(t, "contactDelete.xml"), func(c *Client) error {
 			return c.DeleteContact(context.Background(), "c42")
 		})
 		if req.path != "/contactDelete" {
@@ -297,21 +227,22 @@ func TestContactAddUpdateDeleteRequests(t *testing.T) {
 	})
 
 	t.Run("contactAdd returns the reply's contact_id", func(t *testing.T) {
-		srv := serveXML(t, contactAddReplyFixture)
+		srv := serveXML(t, loadFixture(t, "contactAdd.xml"))
 		c := NewClient(srv.URL, "test-key", "test")
 
 		id, err := c.AddContact(context.Background(), full)
 		if err != nil {
 			t.Fatalf("AddContact: %v", err)
 		}
-		if id != "c42" {
-			t.Errorf("id = %q, want %q", id, "c42")
+		if id != "29145829" {
+			t.Errorf("id = %q, want the fixture's %q", id, "29145829")
 		}
 	})
 
 	t.Run("contactAdd without a contact_id element is an error", func(t *testing.T) {
-		// A success-shaped reply that omits <contact_id> must not yield an
-		// empty id in state; the error names the operation and the element.
+		// Synthetic fault injection: a success-shaped reply that omits
+		// <contact_id> must not yield an empty id in state; the error names the
+		// operation and the element.
 		srv := serveXML(t, contactSuccessReply)
 		c := NewClient(srv.URL, "test-key", "test")
 
@@ -328,17 +259,13 @@ func TestContactAddUpdateDeleteRequests(t *testing.T) {
 	})
 }
 
-// contactListLiveGolden is the exact contactList reply the real API returned
-// for one profile, copied verbatim from the live capture and wrapped in the
-// minimal success envelope. It pins the wire shape the fake used to compensate
-// for: full snake_case element names, not the request's short forms.
-const contactListLiveGolden = `<namesilo><reply><code>300</code><detail>success</detail><contact><contact_id>29145718</contact_id><default_profile>0</default_profile><nickname>tf-live-check</nickname><company>Terraform Provider Acceptance</company><first_name>Terraform</first_name><last_name>Acceptance</last_name><address>1 Test Way</address><address2/><city>Testville</city><state>TX</state><zip>73301</zip><country>US</country><email>terraform-test@example.com</email><phone>+1 512 555 0100</phone><fax/></contact></reply></namesilo>`
-
-// TestContactListLiveGolden decodes the captured real reply as a raw-string
-// golden and asserts every field. Address2 and fax arrive as empty elements and
-// must decode to empty strings, not errors or leftovers.
+// TestContactListLiveGolden decodes the captured contactList reply and asserts
+// every field. It pins the wire shape the fake used to compensate for: full
+// snake_case element names, not the request's short forms. Address2 and fax
+// arrive as empty elements and must decode to empty strings, not errors or
+// leftovers.
 func TestContactListLiveGolden(t *testing.T) {
-	srv := serveXML(t, contactListLiveGolden)
+	srv := serveXML(t, loadFixture(t, "contactList-created.xml"))
 	c := NewClient(srv.URL, "test-key", "test")
 
 	contacts, err := c.ListContacts(context.Background(), "")
@@ -348,40 +275,28 @@ func TestContactListLiveGolden(t *testing.T) {
 	if len(contacts) != 1 {
 		t.Fatalf("contacts = %+v, want one profile", contacts)
 	}
-	want := Contact{
-		ID:             "29145718",
-		DefaultProfile: false,
-		Nickname:       "tf-live-check",
-		Company:        "Terraform Provider Acceptance",
-		FirstName:      "Terraform",
-		LastName:       "Acceptance",
-		Address:        "1 Test Way",
-		Address2:       "",
-		City:           "Testville",
-		State:          "TX",
-		Zip:            "73301",
-		Country:        "US",
-		Email:          "terraform-test@example.com",
-		Phone:          "+1 512 555 0100",
-		Fax:            "",
+	if contacts[0].Address2 != "" {
+		t.Errorf("Address2 = %q, want empty", contacts[0].Address2)
 	}
-	if contacts[0] != want {
-		t.Errorf("contact = %+v, want %+v", contacts[0], want)
+	if contacts[0].Fax != "" {
+		t.Errorf("Fax = %q, want empty", contacts[0].Fax)
 	}
+	assertContactEquals(t, contacts[0], wantCreatedContact)
 }
 
 func TestContactList(t *testing.T) {
 	t.Run("with a contact_id returns that one profile", func(t *testing.T) {
+		body := loadFixture(t, "contactList-created.xml")
 		requests := make(chan capturedRequest, 1)
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			requests <- capturedRequest{path: r.URL.Path, query: r.URL.Query()}
 			w.Header().Set("Content-Type", "text/xml")
-			fmt.Fprint(w, contactFullFixture)
+			fmt.Fprint(w, body)
 		}))
 		defer srv.Close()
 		c := NewClient(srv.URL, "test-key", "test")
 
-		contacts, err := c.ListContacts(context.Background(), "c1")
+		contacts, err := c.ListContacts(context.Background(), "29145829")
 		if err != nil {
 			t.Fatalf("ListContacts: %v", err)
 		}
@@ -389,21 +304,22 @@ func TestContactList(t *testing.T) {
 		if req.path != "/contactList" {
 			t.Errorf("path = %q, want %q", req.path, "/contactList")
 		}
-		if v := req.query.Get("contact_id"); v != "c1" {
-			t.Errorf("contact_id = %q, want %q", v, "c1")
+		if v := req.query.Get("contact_id"); v != "29145829" {
+			t.Errorf("contact_id = %q, want %q", v, "29145829")
 		}
 		if len(contacts) != 1 {
 			t.Fatalf("contacts = %+v, want one profile", contacts)
 		}
-		assertContactFields(t, contacts[0])
+		assertContactEquals(t, contacts[0], wantCreatedContact)
 	})
 
 	t.Run("without a contact_id sends the empty parameter and returns every profile", func(t *testing.T) {
+		body := loadFixture(t, "contactList-all.xml")
 		requests := make(chan capturedRequest, 1)
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			requests <- capturedRequest{path: r.URL.Path, query: r.URL.Query()}
 			w.Header().Set("Content-Type", "text/xml")
-			fmt.Fprint(w, contactListTwoFixture)
+			fmt.Fprint(w, body)
 		}))
 		defer srv.Close()
 		c := NewClient(srv.URL, "test-key", "test")
@@ -414,23 +330,23 @@ func TestContactList(t *testing.T) {
 		}
 		req := <-requests
 		// The contact_id parameter is always sent, even empty (§8.1): empty
-		// means every profile.
+		// means every profile. The captured account has one profile, the
+		// default.
 		if !req.query.Has("contact_id") {
 			t.Errorf("query %v is missing the empty contact_id parameter", req.query)
 		}
 		if v := req.query.Get("contact_id"); v != "" {
 			t.Errorf("contact_id = %q, want empty", v)
 		}
-		if len(contacts) != 2 {
-			t.Fatalf("contacts = %+v, want two profiles", contacts)
+		if len(contacts) != 1 {
+			t.Fatalf("contacts = %+v, want one profile", contacts)
 		}
-		assertContactFields(t, contacts[0])
-		if contacts[1] != wantSecondContact {
-			t.Errorf("contacts[1] = %+v, want %+v", contacts[1], wantSecondContact)
-		}
+		assertContactEquals(t, contacts[0], wantDefaultContact)
 	})
 
 	t.Run("zero profiles is an empty non-nil slice", func(t *testing.T) {
+		// Synthetic success envelope: the corpus has no captured contactList
+		// reply with no <contact> element.
 		srv := serveXML(t, contactSuccessReply)
 		c := NewClient(srv.URL, "test-key", "test")
 
@@ -449,27 +365,28 @@ func TestContactList(t *testing.T) {
 
 func TestContactParsing(t *testing.T) {
 	t.Run("empty elements normalize to empty strings", func(t *testing.T) {
-		// The second profile in the two-profile fixture carries <cp/>,
-		// <ad2/>, <fx/>, and the country-specific elements as empty elements,
-		// which is how the API spells "unset" (§8.4).
-		srv := serveXML(t, contactListTwoFixture)
+		// contactList-single.xml carries <company/>, <address2/>, and <fax/>
+		// as empty elements, which is how the API spells "unset" (§8.4).
+		srv := serveXML(t, loadFixture(t, "contactList-single.xml"))
 		c := NewClient(srv.URL, "test-key", "test")
 
 		contacts, err := c.ListContacts(context.Background(), "")
 		if err != nil {
 			t.Fatalf("ListContacts: %v", err)
 		}
-		if len(contacts) != 2 {
-			t.Fatalf("contacts = %+v, want two profiles", contacts)
+		if len(contacts) != 1 {
+			t.Fatalf("contacts = %+v, want one profile", contacts)
 		}
-		got := contacts[1]
-		if got != wantSecondContact {
-			t.Errorf("contact = %+v, want %+v", got, wantSecondContact)
+		got := contacts[0]
+		if got.Company != "" || got.Address2 != "" || got.Fax != "" {
+			t.Errorf("empty elements = company %q, address2 %q, fax %q; want all empty",
+				got.Company, got.Address2, got.Fax)
 		}
+		assertContactEquals(t, got, wantDefaultContact)
 	})
 
 	t.Run("a single contact element is a one-element result", func(t *testing.T) {
-		srv := serveXML(t, contactFullFixture)
+		srv := serveXML(t, loadFixture(t, "contactList-single.xml"))
 		c := NewClient(srv.URL, "test-key", "test")
 
 		contacts, err := c.ListContacts(context.Background(), "")
@@ -479,22 +396,21 @@ func TestContactParsing(t *testing.T) {
 		if len(contacts) != 1 {
 			t.Fatalf("contacts = %+v, want one element, not a scalar", contacts)
 		}
-		assertContactFields(t, contacts[0])
+		assertContactEquals(t, contacts[0], wantDefaultContact)
 	})
 
 	t.Run("default_profile parses 1 and 0", func(t *testing.T) {
+		// The two captured profiles carry the two legal values: the account
+		// default profile is 1, the created test profile is 0.
 		for _, tc := range []struct {
-			value string
-			want  bool
+			fixture string
+			want    bool
 		}{
-			{value: "1", want: true},
-			{value: "0", want: false},
+			{fixture: "contactList-single.xml", want: true},
+			{fixture: "contactList-created.xml", want: false},
 		} {
-			t.Run(tc.value, func(t *testing.T) {
-				fixture := fmt.Sprintf(`<namesilo><reply><code>300</code><detail>success</detail>
-					<contact><contact_id>c1</contact_id><default_profile>%s</default_profile></contact>
-					</reply></namesilo>`, tc.value)
-				srv := serveXML(t, fixture)
+			t.Run(tc.fixture, func(t *testing.T) {
+				srv := serveXML(t, loadFixture(t, tc.fixture))
 				c := NewClient(srv.URL, "test-key", "test")
 
 				contacts, err := c.ListContacts(context.Background(), "")
@@ -512,6 +428,8 @@ func TestContactParsing(t *testing.T) {
 	})
 
 	t.Run("default_profile any other value is an error", func(t *testing.T) {
+		// Synthetic fault injection: an out-of-range default_profile, which
+		// the capture does not contain.
 		for _, value := range []string{"yes", "2", ""} {
 			fixture := fmt.Sprintf(`<namesilo><reply><code>300</code><detail>success</detail>
 				<contact><contact_id>c1</contact_id><default_profile>%s</default_profile></contact>
@@ -538,7 +456,7 @@ func TestContactParsing(t *testing.T) {
 
 func TestAssociateContacts(t *testing.T) {
 	t.Run("sends every non-empty role", func(t *testing.T) {
-		req := captureRequest(t, contactSuccessReply, func(c *Client) error {
+		req := captureRequest(t, loadFixture(t, "contactDomainAssociate.xml"), func(c *Client) error {
 			return c.AssociateContacts(context.Background(), "example.com", ContactRoles{
 				Registrant:     "c1",
 				Administrative: "c2",
@@ -559,7 +477,7 @@ func TestAssociateContacts(t *testing.T) {
 	})
 
 	t.Run("sends only the non-empty roles", func(t *testing.T) {
-		req := captureRequest(t, contactSuccessReply, func(c *Client) error {
+		req := captureRequest(t, loadFixture(t, "contactDomainAssociate.xml"), func(c *Client) error {
 			return c.AssociateContacts(context.Background(), "example.com", ContactRoles{
 				Registrant: "c1",
 				Technical:  "c3",
@@ -573,7 +491,7 @@ func TestAssociateContacts(t *testing.T) {
 	})
 
 	t.Run("no roles sends only the domain", func(t *testing.T) {
-		req := captureRequest(t, contactSuccessReply, func(c *Client) error {
+		req := captureRequest(t, loadFixture(t, "contactDomainAssociate.xml"), func(c *Client) error {
 			return c.AssociateContacts(context.Background(), "example.com", ContactRoles{})
 		})
 		assertParams(t, req.query, map[string]string{"domain": "example.com"})

@@ -14,35 +14,12 @@ import (
 	"testing"
 )
 
-// getDomainInfoFullFixture is the §8.3 shape: every scalar element, a
-// nameservers list with position attributes, and a contact_ids block with the
-// four roles.
-const getDomainInfoFullFixture = `<namesilo><reply>
-  <code>300</code>
-  <detail>success</detail>
-  <created>2020-01-02</created>
-  <expires>2027-01-02</expires>
-  <status>active</status>
-  <locked>Yes</locked>
-  <private>No</private>
-  <auto_renew>Yes</auto_renew>
-  <traffic_type>U</traffic_type>
-  <email_verification_required>No</email_verification_required>
-  <portfolio>default</portfolio>
-  <forward_url>https://example.net</forward_url>
-  <forward_type>301</forward_type>
-  <nameservers>
-    <nameserver position="1">ns1.example.net</nameserver>
-    <nameserver position="2">ns2.example.net</nameserver>
-    <nameserver position="3">ns3.example.net</nameserver>
-  </nameservers>
-  <contact_ids>
-    <registrant>c1</registrant>
-    <administrative>c2</administrative>
-    <technical>c3</technical>
-    <billing>c4</billing>
-  </contact_ids>
-</reply></namesilo>`
+// getDomainInfoFullFixture is the real getDomainInfo reply, captured live and
+// sanitized. It carries every scalar element, a nameservers list with position
+// attributes, and a contact_ids block with the four roles.
+func getDomainInfoFullFixture(t *testing.T) string {
+	return loadFixture(t, "getDomainInfo.xml")
+}
 
 func serveXML(t *testing.T, body string) *httptest.Server {
 	t.Helper()
@@ -82,12 +59,12 @@ func TestGetDomainInfo(t *testing.T) {
 		gotPath = r.URL.Path
 		requests <- capturedRequest{path: r.URL.Path, query: r.URL.Query()}
 		w.Header().Set("Content-Type", "text/xml")
-		fmt.Fprint(w, getDomainInfoFullFixture)
+		fmt.Fprint(w, getDomainInfoFullFixture(t))
 	}))
 	defer srv.Close()
 	c := NewClient(srv.URL, "test-key", "test")
 
-	info, err := c.GetDomainInfo(context.Background(), "example.com")
+	info, err := c.GetDomainInfo(context.Background(), fixtureDomain)
 	if err != nil {
 		t.Fatalf("GetDomainInfo: %v", err)
 	}
@@ -96,44 +73,44 @@ func TestGetDomainInfo(t *testing.T) {
 	if got.path != "/getDomainInfo" {
 		t.Errorf("path = %q, want %q", got.path, "/getDomainInfo")
 	}
-	if v := got.query.Get("domain"); v != "example.com" {
-		t.Errorf("domain = %q, want %q", v, "example.com")
+	if v := got.query.Get("domain"); v != fixtureDomain {
+		t.Errorf("domain = %q, want %q", v, fixtureDomain)
 	}
 
-	if info.Created != "2020-01-02" {
-		t.Errorf("Created = %q, want %q", info.Created, "2020-01-02")
+	if info.Created != "2026-09-22" {
+		t.Errorf("Created = %q, want %q", info.Created, "2026-09-22")
 	}
-	if info.Expires != "2027-01-02" {
-		t.Errorf("Expires = %q, want %q", info.Expires, "2027-01-02")
+	if info.Expires != "2027-09-22" {
+		t.Errorf("Expires = %q, want %q", info.Expires, "2027-09-22")
 	}
-	if info.Status != "active" {
-		t.Errorf("Status = %q, want %q", info.Status, "active")
+	if info.Status != "Active" {
+		t.Errorf("Status = %q, want %q", info.Status, "Active")
 	}
-	if !info.Locked {
-		t.Error("Locked = false, want true")
+	if info.Locked {
+		t.Error("Locked = true, want false")
 	}
 	if info.Private {
 		t.Error("Private = true, want false")
 	}
-	if !info.AutoRenew {
-		t.Error("AutoRenew = false, want true")
+	if info.AutoRenew {
+		t.Error("AutoRenew = true, want false")
 	}
-	if info.TrafficType != "U" {
-		t.Errorf("TrafficType = %q, want %q", info.TrafficType, "U")
+	if info.TrafficType != "Custom DNS" {
+		t.Errorf("TrafficType = %q, want %q", info.TrafficType, "Custom DNS")
 	}
-	if info.EmailVerificationRequired {
-		t.Error("EmailVerificationRequired = true, want false")
+	if !info.EmailVerificationRequired {
+		t.Error("EmailVerificationRequired = false, want true")
 	}
-	if info.Portfolio != "default" {
-		t.Errorf("Portfolio = %q, want %q", info.Portfolio, "default")
+	if info.Portfolio != "N/A" {
+		t.Errorf("Portfolio = %q, want %q", info.Portfolio, "N/A")
 	}
-	if info.ForwardURL != "https://example.net" {
-		t.Errorf("ForwardURL = %q, want %q", info.ForwardURL, "https://example.net")
+	if info.ForwardURL != "N/A" {
+		t.Errorf("ForwardURL = %q, want %q", info.ForwardURL, "N/A")
 	}
-	if info.ForwardType != "301" {
-		t.Errorf("ForwardType = %q, want %q", info.ForwardType, "301")
+	if info.ForwardType != "N/A" {
+		t.Errorf("ForwardType = %q, want %q", info.ForwardType, "N/A")
 	}
-	wantNS := []string{"ns1.example.net", "ns2.example.net", "ns3.example.net"}
+	wantNS := []string{"NS1.DNSOWL.COM", "NS2.DNSOWL.COM", "NS3.DNSOWL.COM"}
 	if len(info.Nameservers) != len(wantNS) {
 		t.Fatalf("Nameservers = %v, want %v", info.Nameservers, wantNS)
 	}
@@ -142,7 +119,7 @@ func TestGetDomainInfo(t *testing.T) {
 			t.Errorf("Nameservers[%d] = %q, want %q", i, info.Nameservers[i], want)
 		}
 	}
-	wantContacts := ContactRoles{Registrant: "c1", Administrative: "c2", Technical: "c3", Billing: "c4"}
+	wantContacts := ContactRoles{Registrant: "29145691", Administrative: "29145691", Technical: "29145691", Billing: "29145691"}
 	if info.Contacts != wantContacts {
 		t.Errorf("Contacts = %+v, want %+v", info.Contacts, wantContacts)
 	}
@@ -152,6 +129,9 @@ func TestGetDomainInfo(t *testing.T) {
 }
 
 func TestGetDomainInfoQuirks(t *testing.T) {
+	// Synthetic shape and fault fixtures. The corpus captures one successful
+	// getDomainInfo; these exercise quotation/casing and an unrecognized
+	// boolean the capture does not contain, so they stay inline.
 	t.Run("nameservers come back raw", func(t *testing.T) {
 		const fixture = `<namesilo><reply><code>300</code><detail>success</detail>
 			<locked>Yes</locked><private>No</private><auto_renew>Yes</auto_renew>
@@ -245,15 +225,17 @@ func TestChangeNameServers(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			body := loadFixture(t, "changeNameServers.xml")
 			requests := make(chan capturedRequest, 1)
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests <- capturedRequest{path: r.URL.Path, query: r.URL.Query()}
-				writeReply(w, "300", "success")
+				w.Header().Set("Content-Type", "text/xml")
+				fmt.Fprint(w, body)
 			}))
 			defer srv.Close()
 			c := NewClient(srv.URL, "test-key", "test")
 
-			if err := c.ChangeNameServers(context.Background(), "example.com", tc.nameservers); err != nil {
+			if err := c.ChangeNameServers(context.Background(), fixtureDomain, tc.nameservers); err != nil {
 				t.Fatalf("ChangeNameServers: %v", err)
 			}
 
@@ -261,8 +243,8 @@ func TestChangeNameServers(t *testing.T) {
 			if got.path != "/changeNameServers" {
 				t.Errorf("path = %q, want %q", got.path, "/changeNameServers")
 			}
-			if v := got.query.Get("domain"); v != "example.com" {
-				t.Errorf("domain = %q, want %q", v, "example.com")
+			if v := got.query.Get("domain"); v != fixtureDomain {
+				t.Errorf("domain = %q, want %q", v, fixtureDomain)
 			}
 			for i, ns := range tc.nameservers {
 				key := fmt.Sprintf("ns%d", i+1)
@@ -288,6 +270,9 @@ func TestChangeNameServers(t *testing.T) {
 }
 
 func TestListDomains(t *testing.T) {
+	// Synthetic paging fixtures for the loop mechanics (multi-page walks,
+	// duplicate-page guard, empty account, maxBid). The captured paged reply
+	// is pinned end-to-end by TestListDomainsCapturedReply.
 	t.Run("one page with maxBid ignored", func(t *testing.T) {
 		const fixture = `<namesilo><reply><code>300</code><detail>success</detail>
 			<domains>
@@ -452,7 +437,32 @@ func TestListDomains(t *testing.T) {
 	})
 }
 
+func TestListDomainsCapturedReply(t *testing.T) {
+	// The captured listDomains reply is a paged call (page=1, pageSize=100)
+	// carrying the real <pager> and <domain> shapes, so ListDomains drives
+	// its whole paging loop from the captured bytes.
+	srv := serveXML(t, loadFixture(t, "listDomains.xml"))
+	c := NewClient(srv.URL, "test-key", "test")
+
+	list, err := c.ListDomains(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("ListDomains: %v", err)
+	}
+	want := DomainSummary{Name: fixtureDomain, Created: "2026-09-22", Expires: "2027-09-22"}
+	if len(list.Domains) != 1 || list.Domains[0] != want {
+		t.Errorf("list = %+v, want the fixture's single domain %+v", list.Domains, want)
+	}
+	if list.Truncated {
+		t.Error("Truncated = true, want false")
+	}
+}
+
 func TestToggles(t *testing.T) {
+	// Synthetic classification fixture: the per-operation request and the
+	// foreign-code rejection are the subject, and three of the six toggle
+	// codes (251/253/256) have no captured already-in-state reply, so this
+	// stays inline. The captured 250/252/255 replies are classified in
+	// TestReplyCodeClassification.
 	// toggleCodes are the per-operation already-in-state codes. Any code in
 	// this set that is not the operation's own must be an error.
 	toggleCodes := []string{"250", "251", "252", "253", "255", "256"}

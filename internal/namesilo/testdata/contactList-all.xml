@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<namesilo><request><operation>contactList</operation><ip>192.0.2.1</ip></request><reply><code>300</code><detail>success</detail><contact><contact_id>29145691</contact_id><default_profile>1</default_profile><nickname>Default</nickname><company/><first_name>Alex</first_name><last_name>Morgan</last_name><address>4187 Maple Street</address><address2/><city>Springfield</city><state>IL</state><zip>62704</zip><country>US</country><email>contact@example.com</email><phone>+15125550100</phone><fax/></contact><note>success</note></reply></namesilo>

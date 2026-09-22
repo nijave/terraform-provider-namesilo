@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<namesilo><request><operation>dnsSecListRecords</operation><ip>192.0.2.1</ip></request><reply><code>300</code><detail>success</detail><ds_record><keyTag>12345</keyTag><algorithm>13</algorithm><digestType>2</digestType><digest>ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB</digest></ds_record></reply></namesilo>

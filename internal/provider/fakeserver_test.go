@@ -508,7 +508,16 @@ func (f *fakeNamesilo) handleGetDomainInfo(w http.ResponseWriter, operation, dom
 // page parameter, the way a broken API behaves: the client sees a repeated
 // page, stops with Truncated set, and the data source warns that the list may
 // be incomplete (§7, §4 invariant 13).
+//
+// The captured listDomains reply is a paged call (page=1, pageSize=100) and
+// carries the <pager> the client's loop is driven by; a bare call without
+// paging parameters gets no pager (verified live). So the fake emits the pager
+// only when the request carries a paging parameter, matching the capture for
+// the calls the client makes and the live behavior for bare ones.
 func (f *fakeNamesilo) handleListDomains(w http.ResponseWriter, operation string, query map[string][]string) {
+	_, hasPage := query["page"]
+	_, hasPageSize := query["pageSize"]
+	paged := hasPage || hasPageSize
 	page, err := strconv.ParseInt(firstValue(query, "page"), 10, 64)
 	if err != nil || page < 1 {
 		page = 1
@@ -546,11 +555,13 @@ func (f *fakeNamesilo) handleListDomains(w http.ResponseWriter, operation string
 			`" expires="` + xmlEscape(row.Expires) + `">` + xmlEscape(row.Name) + "</domain>")
 	}
 	b.WriteString("</domains>")
-	b.WriteString("<pager>")
-	b.WriteString("<total>" + strconv.FormatInt(total, 10) + "</total>")
-	b.WriteString("<pageSize>" + strconv.FormatInt(pageSize, 10) + "</pageSize>")
-	b.WriteString("<page>" + strconv.FormatInt(page, 10) + "</page>")
-	b.WriteString("</pager>")
+	if paged {
+		b.WriteString("<pager>")
+		b.WriteString("<page>" + strconv.FormatInt(page, 10) + "</page>")
+		b.WriteString("<pageSize>" + strconv.FormatInt(pageSize, 10) + "</pageSize>")
+		b.WriteString("<total>" + strconv.FormatInt(total, 10) + "</total>")
+		b.WriteString("</pager>")
+	}
 
 	writeReply(w, operation, "300", "success", b.String())
 }
@@ -887,11 +898,14 @@ func contactFromQuery(query map[string][]string) namesilo.Contact {
 	}
 }
 
-// contactReply renders one <contact> element. Every field is emitted; unset
-// optionals arrive as empty elements, the shape the client normalizes to empty
-// strings. default_profile is always the strict 1/0 the client requires. The
-// element names are the reply's full snake_case names, not the request's short
-// parameter names: the reply and the request spell the same fields differently.
+// contactReply renders one <contact> element with the captured contactList
+// skeleton: the full snake_case element names, not the request's short
+// parameter names, and a self-closing empty element for each unset scalar.
+//
+// The country-specific elements (us_nexus_category and the rest) are omitted
+// entirely when unset, the shape the captured profiles show: unlike company,
+// address2, and fax, the API does not emit empty placeholders for them. Values
+// the provider writes are still echoed so they round-trip through read.
 func contactReply(contact namesilo.Contact) string {
 	defaultProfile := "0"
 	if contact.DefaultProfile {
@@ -899,30 +913,46 @@ func contactReply(contact namesilo.Contact) string {
 	}
 	var b strings.Builder
 	b.WriteString("<contact>")
-	b.WriteString("<contact_id>" + xmlEscape(contact.ID) + "</contact_id>")
+	writeContactElement(&b, "contact_id", contact.ID)
 	b.WriteString("<default_profile>" + defaultProfile + "</default_profile>")
-	b.WriteString("<nickname>" + xmlEscape(contact.Nickname) + "</nickname>")
-	b.WriteString("<company>" + xmlEscape(contact.Company) + "</company>")
-	b.WriteString("<first_name>" + xmlEscape(contact.FirstName) + "</first_name>")
-	b.WriteString("<last_name>" + xmlEscape(contact.LastName) + "</last_name>")
-	b.WriteString("<address>" + xmlEscape(contact.Address) + "</address>")
-	b.WriteString("<address2>" + xmlEscape(contact.Address2) + "</address2>")
-	b.WriteString("<city>" + xmlEscape(contact.City) + "</city>")
-	b.WriteString("<state>" + xmlEscape(contact.State) + "</state>")
-	b.WriteString("<zip>" + xmlEscape(contact.Zip) + "</zip>")
-	b.WriteString("<country>" + xmlEscape(contact.Country) + "</country>")
-	b.WriteString("<email>" + xmlEscape(contact.Email) + "</email>")
-	b.WriteString("<phone>" + xmlEscape(contact.Phone) + "</phone>")
-	b.WriteString("<fax>" + xmlEscape(contact.Fax) + "</fax>")
-	b.WriteString("<us_nexus_category>" + xmlEscape(contact.UsNexusCategory) + "</us_nexus_category>")
-	b.WriteString("<us_application_purpose>" + xmlEscape(contact.UsApplicationPurpose) + "</us_application_purpose>")
-	b.WriteString("<ca_legal_form>" + xmlEscape(contact.CaLegalForm) + "</ca_legal_form>")
-	b.WriteString("<ca_language>" + xmlEscape(contact.CaLanguage) + "</ca_language>")
-	b.WriteString("<ca_agreement_version>" + xmlEscape(contact.CaAgreementVersion) + "</ca_agreement_version>")
-	b.WriteString("<ca_whois_display>" + xmlEscape(contact.CaWhoisDisplay) + "</ca_whois_display>")
-	b.WriteString("<eu_citizenship_country>" + xmlEscape(contact.EuCitizenshipCountry) + "</eu_citizenship_country>")
+	writeContactElement(&b, "nickname", contact.Nickname)
+	writeContactElement(&b, "company", contact.Company)
+	writeContactElement(&b, "first_name", contact.FirstName)
+	writeContactElement(&b, "last_name", contact.LastName)
+	writeContactElement(&b, "address", contact.Address)
+	writeContactElement(&b, "address2", contact.Address2)
+	writeContactElement(&b, "city", contact.City)
+	writeContactElement(&b, "state", contact.State)
+	writeContactElement(&b, "zip", contact.Zip)
+	writeContactElement(&b, "country", contact.Country)
+	writeContactElement(&b, "email", contact.Email)
+	writeContactElement(&b, "phone", contact.Phone)
+	writeContactElement(&b, "fax", contact.Fax)
+	for _, e := range []struct{ tag, value string }{
+		{"us_nexus_category", contact.UsNexusCategory},
+		{"us_application_purpose", contact.UsApplicationPurpose},
+		{"ca_legal_form", contact.CaLegalForm},
+		{"ca_language", contact.CaLanguage},
+		{"ca_agreement_version", contact.CaAgreementVersion},
+		{"ca_whois_display", contact.CaWhoisDisplay},
+		{"eu_citizenship_country", contact.EuCitizenshipCountry},
+	} {
+		if e.value != "" {
+			writeContactElement(&b, e.tag, e.value)
+		}
+	}
 	b.WriteString("</contact>")
 	return b.String()
+}
+
+// writeContactElement writes one contact field, self-closing when its value is
+// empty: the API spells "unset" that way in the captured profiles.
+func writeContactElement(b *strings.Builder, tag, value string) {
+	if value == "" {
+		b.WriteString("<" + tag + "/>")
+		return
+	}
+	b.WriteString("<" + tag + ">" + xmlEscape(value) + "</" + tag + ">")
 }
 
 // handleContactList renders the account's profiles. A non-empty contact_id
@@ -949,6 +979,9 @@ func (f *fakeNamesilo) handleContactList(w http.ResponseWriter, operation string
 	for _, contact := range contacts {
 		b.WriteString(contactReply(contact))
 	}
+	// The captured contactList replies close the reply with <note>success</note>
+	// after the contact elements.
+	b.WriteString("<note>success</note>")
 	writeReply(w, operation, "300", "success", b.String())
 }
 

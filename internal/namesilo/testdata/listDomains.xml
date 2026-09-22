@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="utf-8"?>
+<namesilo><request><operation>listDomains</operation><ip>192.0.2.1</ip></request><reply><code>300</code><detail>success</detail><domains><domain created="2026-09-22" expires="2027-09-22">testing-1519107.top</domain></domains><pager><page>1</page><pageSize>100</pageSize><total>1</total></pager></reply></namesilo>
