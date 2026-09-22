@@ -1,0 +1,91 @@
+# terraform-provider-namesilo
+
+A Terraform and OpenTofu provider for NameSilo registrar state — the
+nameserver delegation, the DS records that bind DNSSEC keys, WHOIS privacy,
+the registrar lock, auto-renew, contact profiles, and the domain contact
+associations. Six read-only data sources read the same state back, including
+the account's full domain inventory.
+
+## Example
+
+```hcl
+provider "namesilo" {
+  api_key = var.namesilo_api_key
+}
+
+resource "namesilo_nameservers" "delegation" {
+  domain = "example.com"
+
+  nameservers = [
+    "ns1.example.net",
+    "ns2.example.net",
+  ]
+}
+
+resource "namesilo_dnssec_records" "ds" {
+  domain = "example.com"
+
+  records = [{
+    key_tag     = 2371
+    algorithm   = 13
+    digest_type = 2
+    digest      = "8f9e1c6f5d5d5c9a1e0d3b7f2a4c6e8d0b2f4a6c8e0d2f4a6b8c0e2d4f6a8c0e"
+  }]
+}
+```
+
+## Requirements
+
+- OpenTofu >= 1.10 (the primary target, and what CI tests) or Terraform >= 1.10.
+  Terraform is expected to work but is not tested.
+- Go >= 1.25.12 to build (the module's `go` directive is the floor).
+
+## Configuration
+
+The provider block takes three optional attributes. `api_key` falls back to
+the `NAMESILO_API_KEY` environment variable, and configuration fails when the
+resolved value is empty: set the key from the environment or from a sensitive
+variable, never in source control. `endpoint` falls back to the
+`NAMESILO_API_ENDPOINT` environment variable, then to the production endpoint
+`https://www.namesilo.com/api`; a trailing slash is trimmed. `page_size` is
+the page size the `namesilo_domains` data source requests for the inventory;
+it defaults to 100. The generated schema below lists all three.
+
+## Destroy semantics
+
+Destroying these resources performs a final API call — it does not simply
+stop managing the attribute:
+
+- `namesilo_nameservers` — removing the resource repoints the domain at
+  NameSilo's default nameservers (`ns1.dnsowl.com`, `ns2.dnsowl.com`,
+  `ns3.dnsowl.com`), because the API has no remove-all-nameservers call. That
+  is an outage if the zone is hosted elsewhere. Destroy the resource only when
+  the domain is being retired or is moving to a different delegation.
+- `namesilo_dnssec_records` — destroying the resource deletes the domain's DS
+  records, which disables DNSSEC.
+- `namesilo_domain_lock` — destroying the resource releases the registrar
+  lock and leaves the domain free to transfer.
+- `namesilo_auto_renew` — destroying the resource turns auto-renew off; the
+  domain can then expire uncaught.
+- `namesilo_domain_contacts` — destroying the resource stops managing the
+  role assignments and leaves them in place; the API cannot clear a role.
+
+## Personal data in state
+
+`namesilo_contact` and `namesilo_domain_contacts` store contact data — names,
+addresses, phone numbers, email addresses — and `namesilo_contacts` reads all
+of it back. Every such attribute is marked `Sensitive`, which masks CLI
+output only: the state file still contains the data. Treat the state file as
+personal data and store it accordingly. For stronger masking, add
+`sensitive = true` to your own input variables and feed the resources from
+them.
+
+## License
+
+GPL-3.0-or-later. Every dependency is GPL-compatible (MPL-2.0, BSD-3-Clause,
+MIT, or Apache-2.0).
+{{/* This provider has a configuration schema (api_key, endpoint, page_size),
+so the generated schema section is included here — the accumulator omits it
+only because its provider block is empty and the section would render an
+empty "## Schema" heading. */}}
+{{ .SchemaMarkdown | trimspace }}
