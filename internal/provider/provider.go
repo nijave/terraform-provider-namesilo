@@ -73,10 +73,12 @@ func (p *namesiloProvider) Schema(_ context.Context, _ provider.SchemaRequest, r
 	}
 }
 
-// Resources returns nothing yet. Every resource task appends its constructor
-// here.
+// Resources returns the provider's resources. Every resource task appends its
+// constructor here.
 func (p *namesiloProvider) Resources(_ context.Context) []func() resource.Resource {
-	return []func() resource.Resource{}
+	return []func() resource.Resource{
+		NewNameserversResource,
+	}
 }
 
 // DataSources returns nothing yet. The data source tasks append their
