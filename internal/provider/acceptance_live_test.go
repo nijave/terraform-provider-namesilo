@@ -942,13 +942,14 @@ func TestAccLiveAutoRenewImport(t *testing.T) {
 }
 
 // TestAccLiveDNSSEC covers §12.3's add, roll, and remove case with synthetic
-// DS records: the first apply publishes one, the roll adds a second (the
-// provider's add-before-delete order keeps a window with both published), and
-// the empty set removes both. The synthetic records make the domain fail
-// DNSSEC validation while they exist, which is what the opt-in accepts. Note
-// that the resource is authoritative: any DS records the domain already had
-// are removed in the first apply, and the destroy at the end deletes every
-// record present, leaving the domain unsigned.
+// DS records: the first apply publishes one record, the second replaces the
+// set with a different record — one reconcile that adds the new DS before
+// deleting the old one, the §6.2 order that keeps a window with both
+// published — and the empty set removes the survivor. The synthetic records
+// make the domain fail DNSSEC validation while they exist, which is what the
+// opt-in accepts. Note that the resource is authoritative: any DS records the
+// domain already had are removed in the first apply, and the destroy at the
+// end deletes every record present, leaving the domain unsigned.
 func TestAccLiveDNSSEC(t *testing.T) {
 	testAccLivePreCheck(t)
 	liveOptIn(t, envOptInDNSSEC,
@@ -965,6 +966,8 @@ func TestAccLiveDNSSEC(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
+				// The add: one synthetic DS record is published, and the
+				// settling plan is quiet once it is.
 				Config: liveDNSSECConfig(domain, "["+recordOne+"]"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue("namesilo_dnssec_records.test",
@@ -976,16 +979,15 @@ func TestAccLiveDNSSEC(t *testing.T) {
 				ConfigPlanChecks: expectEmptyAfterRefresh(),
 			},
 			{
-				// The key roll: the second record joins the first, and the
-				// settling plan is quiet once both are published.
-				Config: liveDNSSECConfig(domain, "["+recordOne+", "+recordTwo+"]"),
+				// The roll: the desired set changes to a different record, so
+				// one reconcile adds recordTwo before deleting recordOne —
+				// the add-before-delete contract of §6.2 and §16 — and the
+				// settling plan is quiet once only recordTwo is published.
+				Config: liveDNSSECConfig(domain, "["+recordTwo+"]"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue("namesilo_dnssec_records.test",
 						tfjsonpath.New("records"),
-						knownvalue.SetExact([]knownvalue.Check{
-							expectDSRecord(12345, digestOne),
-							expectDSRecord(23456, digestTwo),
-						})),
+						knownvalue.SetExact([]knownvalue.Check{expectDSRecord(23456, digestTwo)})),
 				},
 				ConfigPlanChecks: resource.ConfigPlanChecks{
 					PreApply: []plancheck.PlanCheck{
@@ -995,8 +997,8 @@ func TestAccLiveDNSSEC(t *testing.T) {
 				},
 			},
 			{
-				// The empty set declares the domain unsigned: every managed
-				// record is deleted and the plan stays quiet afterwards.
+				// The remove: the empty set declares the domain unsigned, so
+				// the survivor is deleted and the plan stays quiet afterwards.
 				Config: liveDNSSECConfig(domain, "[]"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue("namesilo_dnssec_records.test",
