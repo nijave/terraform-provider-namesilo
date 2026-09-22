@@ -4,6 +4,7 @@ package provider_test
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -68,9 +69,6 @@ func TestAccNameserversCreate(t *testing.T) {
 	defer fake.Close()
 	fake.addDomain("example.com").nameservers = []string{"ns1.dnsowl.com", "ns2.dnsowl.com", "ns3.dnsowl.com"}
 
-	// Count the configured call before the automatic destroy runs, then let the
-	// CheckDestroy assert the destroy's own call.
-	createdWithConfiguredSet := false
 	resource.Test(t, resource.TestCase{
 		IsUnitTest:               true,
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -83,49 +81,105 @@ func TestAccNameserversCreate(t *testing.T) {
 					knownvalue.StringExact("example.com")),
 			},
 			ConfigPlanChecks: expectEmptyAfterRefresh(),
+			// PostApplyFunc runs per step, before resource.Test's automatic
+			// destroy, so the log here holds exactly the create's call.
 			PostApplyFunc: func() {
+				if got := fake.count("changeNameServers"); got != 1 {
+					t.Errorf("changeNameServers called %d times, want 1", got)
+				}
 				last := fake.lastRequest("changeNameServers")
-				createdWithConfiguredSet = strings.Contains(last, "ns1=ns1.example.net") &&
-					strings.Contains(last, "ns2=ns2.example.net")
+				if !strings.Contains(last, "ns1=ns1.example.net") || !strings.Contains(last, "ns2=ns2.example.net") {
+					t.Errorf("changeNameServers not called with the configured set: %s", last)
+				}
 				if strings.Contains(last, "test-key") {
 					t.Errorf("the request log leaked the API key: %s", last)
 				}
 			},
 		}},
 	})
-
-	if !createdWithConfiguredSet {
-		t.Errorf("changeNameServers was not called with the configured set: %s", fake.lastRequest("changeNameServers"))
-	}
 }
 
-// TestAccNameserversReadNormalizes covers §4 invariant 1 against an API that
-// returns uppercase, trailing-dotted names: the lowercase configuration plans
-// and applies quietly, because ModifyPlan and Read both normalize.
+// TestAccNameserversReadNormalizes covers §4 invariant 1 against the §8.4
+// quirk that names come back uppercase with a trailing dot. Step 1 creates
+// from a lowercase configuration. Step 2 rewrites the fake's nameservers out
+// of band to the exact uppercase, dotted shape, so the refresh that precedes
+// this step's plan makes Read observe them: the state must come back lowercase
+// and the plan must stay empty. If Read stopped normalizing, the state would
+// hold the uppercase, dotted names and this step's plan would show a diff.
 func TestAccNameserversReadNormalizes(t *testing.T) {
 	requireTofu(t)
 	fake := newFakeNamesilo()
 	defer fake.Close()
-	fake.addDomain("example.com").nameservers = []string{"NS1.EXAMPLE.NET.", "NS2.EXAMPLE.NET."}
+	fake.addDomain("example.com").nameservers = []string{"ns1.dnsowl.com", "ns2.dnsowl.com", "ns3.dnsowl.com"}
+
+	config := nameserversConfig(fake.URL(), `["ns1.example.net", "ns2.example.net"]`)
 
 	resource.Test(t, resource.TestCase{
 		IsUnitTest:               true,
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: nameserversConfig(fake.URL(), `["ns1.example.net", "ns2.example.net"]`),
+				Config:            config,
+				ConfigStateChecks: []statecheck.StateCheck{expectNameservers("ns1.example.net", "ns2.example.net")},
+				ConfigPlanChecks:  expectEmptyAfterRefresh(),
+			},
+			{
+				PreConfig: func() {
+					// Out-of-band change to the raw API shape: uppercase,
+					// trailing-dotted, as NameSilo sometimes returns (§8.4).
+					fake.setNameservers("example.com", []string{"NS1.EXAMPLE.NET.", "NS2.EXAMPLE.NET."})
+				},
+				Config: config,
 				ConfigStateChecks: []statecheck.StateCheck{
 					expectNameservers("ns1.example.net", "ns2.example.net"),
 				},
-				ConfigPlanChecks: expectEmptyAfterRefresh(),
-			},
-			{
-				// A second identical step: the normalized state must still
-				// match the configuration with no diff.
-				Config:           nameserversConfig(fake.URL(), `["ns1.example.net", "ns2.example.net"]`),
-				ConfigPlanChecks: expectEmptyAfterRefresh(),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					// The plan that precedes the apply has already refreshed:
+					// Read has seen the uppercase, dotted names and must have
+					// written the normalized set, or this plan is not empty.
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+					// The plan after the apply and a second refresh must stay
+					// empty: normalization is idempotent across refreshes.
+					PostApplyPostRefresh: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+				// A normalized Read is a refresh only: it must not write.
+				PostApplyFunc: func() {
+					if got := fake.count("changeNameServers"); got != 1 {
+						t.Errorf("changeNameServers called %d times, want 1 (the create in step 1)", got)
+					}
+				},
 			},
 		},
+	})
+}
+
+// TestAccNameserversReadEmptyIsError covers §6.1's error path: a getDomainInfo
+// reply with no nameservers cannot be stored (the schema requires at least
+// two), so Read must report an error diagnostic rather than write an empty
+// set. The construction is an import of a zero-nameserver fake domain: the
+// import seeds id and domain, its Read hits the empty reply, and the import
+// fails with that diagnostic — no state results.
+func TestAccNameserversReadEmptyIsError(t *testing.T) {
+	requireTofu(t)
+	fake := newFakeNamesilo()
+	defer fake.Close()
+	// addDomain without seeding nameservers leaves them empty, so getDomainInfo
+	// replies with an empty <nameservers> element.
+	fake.addDomain("example.com")
+
+	resource.Test(t, resource.TestCase{
+		IsUnitTest:               true,
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config:        nameserversConfig(fake.URL(), `["ns1.example.net", "ns2.example.net"]`),
+			ResourceName:  "namesilo_nameservers.test",
+			ImportState:   true,
+			ImportStateId: "example.com",
+			// The provider-only phrase, not echoable from the configuration,
+			// so the step cannot pass on tofu's echo of the config.
+			ExpectError:       regexp.MustCompile(`returned no nameservers`),
+			ImportStateVerify: false,
+		}},
 	})
 }
 
