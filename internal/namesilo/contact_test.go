@@ -21,33 +21,34 @@ const contactSuccessReply = `<namesilo><reply><code>300</code><detail>success</d
 const contactAddReplyFixture = `<namesilo><reply><code>300</code><detail>success</detail><contact_id>c42</contact_id></reply></namesilo>`
 
 // contactFullFixture is one contactList profile with every field set, in the
-// shape NameSilo's own contactList replies have (§8.4).
+// shape NameSilo's own contactList replies have (§8.4): the reply uses the
+// full snake_case element names, unlike the request's short parameter names.
 const contactFullFixture = `<namesilo><reply>
   <code>300</code>
   <detail>success</detail>
   <contact>
     <contact_id>c1</contact_id>
     <default_profile>1</default_profile>
-    <nn>home</nn>
-    <cp>Example Co</cp>
-    <fn>Ada</fn>
-    <ln>Lovelace</ln>
-    <ad>1 Main St</ad>
-    <ad2>Suite 2</ad2>
-    <cy>Exampletown</cy>
-    <st>CA</st>
-    <zp>90210</zp>
-    <ct>US</ct>
-    <em>ada@example.net</em>
-    <ph>1-555-0100</ph>
-    <fx>1-555-0101</fx>
-    <usnc>C11</usnc>
-    <usap>P1</usap>
-    <calf>CORP</calf>
-    <caln>EN</caln>
-    <caag>1.0</caag>
-    <cawd>PRIVATE</cawd>
-    <eucs>DE</eucs>
+    <nickname>home</nickname>
+    <company>Example Co</company>
+    <first_name>Ada</first_name>
+    <last_name>Lovelace</last_name>
+    <address>1 Main St</address>
+    <address2>Suite 2</address2>
+    <city>Exampletown</city>
+    <state>CA</state>
+    <zip>90210</zip>
+    <country>US</country>
+    <email>ada@example.net</email>
+    <phone>1-555-0100</phone>
+    <fax>1-555-0101</fax>
+    <us_nexus_category>C11</us_nexus_category>
+    <us_application_purpose>P1</us_application_purpose>
+    <ca_legal_form>CORP</ca_legal_form>
+    <ca_language>EN</ca_language>
+    <ca_agreement_version>1.0</ca_agreement_version>
+    <ca_whois_display>PRIVATE</ca_whois_display>
+    <eu_citizenship_country>DE</eu_citizenship_country>
   </contact>
 </reply></namesilo>`
 
@@ -59,50 +60,50 @@ const contactListTwoFixture = `<namesilo><reply>
   <contact>
     <contact_id>c1</contact_id>
     <default_profile>1</default_profile>
-    <nn>home</nn>
-    <cp>Example Co</cp>
-    <fn>Ada</fn>
-    <ln>Lovelace</ln>
-    <ad>1 Main St</ad>
-    <ad2>Suite 2</ad2>
-    <cy>Exampletown</cy>
-    <st>CA</st>
-    <zp>90210</zp>
-    <ct>US</ct>
-    <em>ada@example.net</em>
-    <ph>1-555-0100</ph>
-    <fx>1-555-0101</fx>
-    <usnc>C11</usnc>
-    <usap>P1</usap>
-    <calf>CORP</calf>
-    <caln>EN</caln>
-    <caag>1.0</caag>
-    <cawd>PRIVATE</cawd>
-    <eucs>DE</eucs>
+    <nickname>home</nickname>
+    <company>Example Co</company>
+    <first_name>Ada</first_name>
+    <last_name>Lovelace</last_name>
+    <address>1 Main St</address>
+    <address2>Suite 2</address2>
+    <city>Exampletown</city>
+    <state>CA</state>
+    <zip>90210</zip>
+    <country>US</country>
+    <email>ada@example.net</email>
+    <phone>1-555-0100</phone>
+    <fax>1-555-0101</fax>
+    <us_nexus_category>C11</us_nexus_category>
+    <us_application_purpose>P1</us_application_purpose>
+    <ca_legal_form>CORP</ca_legal_form>
+    <ca_language>EN</ca_language>
+    <ca_agreement_version>1.0</ca_agreement_version>
+    <ca_whois_display>PRIVATE</ca_whois_display>
+    <eu_citizenship_country>DE</eu_citizenship_country>
   </contact>
   <contact>
     <contact_id>c2</contact_id>
     <default_profile>0</default_profile>
-    <nn>work</nn>
-    <cp/>
-    <fn>Grace</fn>
-    <ln>Hopper</ln>
-    <ad>9 Fleet St</ad>
-    <ad2/>
-    <cy>Arlington</cy>
-    <st>VA</st>
-    <zp>22201</zp>
-    <ct>US</ct>
-    <em>grace@example.net</em>
-    <ph>1-555-0199</ph>
-    <fx/>
-    <usnc/>
-    <usap/>
-    <calf/>
-    <caln/>
-    <caag/>
-    <cawd/>
-    <eucs/>
+    <nickname>work</nickname>
+    <company/>
+    <first_name>Grace</first_name>
+    <last_name>Hopper</last_name>
+    <address>9 Fleet St</address>
+    <address2/>
+    <city>Arlington</city>
+    <state>VA</state>
+    <zip>22201</zip>
+    <country>US</country>
+    <email>grace@example.net</email>
+    <phone>1-555-0199</phone>
+    <fax/>
+    <us_nexus_category/>
+    <us_application_purpose/>
+    <ca_legal_form/>
+    <ca_language/>
+    <ca_agreement_version/>
+    <ca_whois_display/>
+    <eu_citizenship_country/>
   </contact>
 </reply></namesilo>`
 
@@ -325,6 +326,48 @@ func TestContactAddUpdateDeleteRequests(t *testing.T) {
 			t.Errorf("error %q does not name the element", err)
 		}
 	})
+}
+
+// contactListLiveGolden is the exact contactList reply the real API returned
+// for one profile, copied verbatim from the live capture and wrapped in the
+// minimal success envelope. It pins the wire shape the fake used to compensate
+// for: full snake_case element names, not the request's short forms.
+const contactListLiveGolden = `<namesilo><reply><code>300</code><detail>success</detail><contact><contact_id>29145718</contact_id><default_profile>0</default_profile><nickname>tf-live-check</nickname><company>Terraform Provider Acceptance</company><first_name>Terraform</first_name><last_name>Acceptance</last_name><address>1 Test Way</address><address2/><city>Testville</city><state>TX</state><zip>73301</zip><country>US</country><email>terraform-test@example.com</email><phone>+1 512 555 0100</phone><fax/></contact></reply></namesilo>`
+
+// TestContactListLiveGolden decodes the captured real reply as a raw-string
+// golden and asserts every field. Address2 and fax arrive as empty elements and
+// must decode to empty strings, not errors or leftovers.
+func TestContactListLiveGolden(t *testing.T) {
+	srv := serveXML(t, contactListLiveGolden)
+	c := NewClient(srv.URL, "test-key", "test")
+
+	contacts, err := c.ListContacts(context.Background(), "")
+	if err != nil {
+		t.Fatalf("ListContacts: %v", err)
+	}
+	if len(contacts) != 1 {
+		t.Fatalf("contacts = %+v, want one profile", contacts)
+	}
+	want := Contact{
+		ID:             "29145718",
+		DefaultProfile: false,
+		Nickname:       "tf-live-check",
+		Company:        "Terraform Provider Acceptance",
+		FirstName:      "Terraform",
+		LastName:       "Acceptance",
+		Address:        "1 Test Way",
+		Address2:       "",
+		City:           "Testville",
+		State:          "TX",
+		Zip:            "73301",
+		Country:        "US",
+		Email:          "terraform-test@example.com",
+		Phone:          "+1 512 555 0100",
+		Fax:            "",
+	}
+	if contacts[0] != want {
+		t.Errorf("contact = %+v, want %+v", contacts[0], want)
+	}
 }
 
 func TestContactList(t *testing.T) {

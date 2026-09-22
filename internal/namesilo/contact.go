@@ -36,33 +36,37 @@ type Contact struct {
 	EuCitizenshipCountry string // eucs
 }
 
-// contactXML is one <contact> element in a contactList reply. The element
-// names are the API's short forms; unset fields arrive as empty elements and
-// decode to empty strings (§8.4).
+// contactXML is one <contact> element in a contactList reply. The reply uses
+// the full snake_case element names, not the short forms the request carries:
+// nickname, company, first_name, and so on, while the request parameters are
+// nn, cp, fn. The TLD-specific elements (us_nexus_category, and the rest)
+// follow the same reply convention but were not exercised by the live probe,
+// because its profiles set none of them. Unset fields arrive as empty elements
+// and decode to empty strings (§8.4).
 type contactXML struct {
 	ContactID      string `xml:"contact_id"`
 	DefaultProfile string `xml:"default_profile"`
 
-	Nickname             string `xml:"nn"`
-	Company              string `xml:"cp"`
-	FirstName            string `xml:"fn"`
-	LastName             string `xml:"ln"`
-	Address              string `xml:"ad"`
-	Address2             string `xml:"ad2"`
-	City                 string `xml:"cy"`
-	State                string `xml:"st"`
-	Zip                  string `xml:"zp"`
-	Country              string `xml:"ct"`
-	Email                string `xml:"em"`
-	Phone                string `xml:"ph"`
-	Fax                  string `xml:"fx"`
-	UsNexusCategory      string `xml:"usnc"`
-	UsApplicationPurpose string `xml:"usap"`
-	CaLegalForm          string `xml:"calf"`
-	CaLanguage           string `xml:"caln"`
-	CaAgreementVersion   string `xml:"caag"`
-	CaWhoisDisplay       string `xml:"cawd"`
-	EuCitizenshipCountry string `xml:"eucs"`
+	Nickname             string `xml:"nickname"`
+	Company              string `xml:"company"`
+	FirstName            string `xml:"first_name"`
+	LastName             string `xml:"last_name"`
+	Address              string `xml:"address"`
+	Address2             string `xml:"address2"`
+	City                 string `xml:"city"`
+	State                string `xml:"state"`
+	Zip                  string `xml:"zip"`
+	Country              string `xml:"country"`
+	Email                string `xml:"email"`
+	Phone                string `xml:"phone"`
+	Fax                  string `xml:"fax"`
+	UsNexusCategory      string `xml:"us_nexus_category"`
+	UsApplicationPurpose string `xml:"us_application_purpose"`
+	CaLegalForm          string `xml:"ca_legal_form"`
+	CaLanguage           string `xml:"ca_language"`
+	CaAgreementVersion   string `xml:"ca_agreement_version"`
+	CaWhoisDisplay       string `xml:"ca_whois_display"`
+	EuCitizenshipCountry string `xml:"eu_citizenship_country"`
 }
 
 // parseDefaultProfile reads the API's default_profile element. Only 1 and 0

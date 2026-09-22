@@ -108,6 +108,47 @@ func TestAccDomainContactsPartial(t *testing.T) {
 	})
 }
 
+// TestAccDomainContactsCreateStaleRead is the regression cover for the real
+// API's association propagation window: contactDomainAssociate succeeds before
+// getDomainInfo reports the new role, so Create must not re-read the roles it
+// just set. The fake is put into stale-read mode, which makes the first
+// getDomainInfo after the write answer with the pre-write associations. Create
+// must keep the planned registrant, not the stale read, or OpenTofu rejects the
+// apply as an inconsistent result. The settling step's refresh sees the
+// released role, so the stale read leaves no lasting drift.
+func TestAccDomainContactsCreateStaleRead(t *testing.T) {
+	requireTofu(t)
+	fake := newFakeNamesilo()
+	defer fake.Close()
+	seedDomainContacts(fake,
+		namesilo.ContactRoles{Registrant: "9999", Administrative: "1002", Technical: "1003", Billing: "1004"},
+		"9999", "1001", "1002", "1003", "1004")
+	fake.setStaleRoleReads(true)
+
+	config := domainContactsConfig(fake.URL(), map[string]string{"registrant": "1001"})
+
+	resource.Test(t, resource.TestCase{
+		IsUnitTest:               true,
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+				ConfigStateChecks: []statecheck.StateCheck{
+					expectDomainContactsString("id", "example.com"),
+					expectDomainContactsString("registrant", "1001"),
+					expectDomainContactsString("administrative", "1002"),
+					expectDomainContactsString("technical", "1003"),
+					expectDomainContactsString("billing", "1004"),
+				},
+			},
+			{
+				Config:           config,
+				ConfigPlanChecks: expectEmptyAfterRefresh(),
+			},
+		},
+	})
+}
+
 // TestAccDomainContactsUpdate covers §12.2 "association update": changing one
 // configured role issues one call with that role, and the roles that are not
 // configured are left untouched.

@@ -9,8 +9,8 @@ import (
 	"strings"
 )
 
-// parseDSInt reads one of the DS record's integer elements: key_tag,
-// digest_type, or algorithm. The error names the operation and the field and
+// parseDSInt reads one of the DS record's integer elements: keyTag,
+// digestType, or algorithm. The error names the operation and the field and
 // nothing else (§8.4: field names only, however public a digest is).
 func parseDSInt(operation, field, value string) (int64, error) {
 	n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
@@ -21,15 +21,16 @@ func parseDSInt(operation, field, value string) (int64, error) {
 }
 
 // dsRecordXML is one ds_record element in a dnsSecListRecords reply. The
-// element names are the response's own spelling: the full-word algorithm and
-// the snake_case key_tag and digest_type. The request parameters spell two of
-// the same fields differently (keyTag, digestType, alg), and the asymmetry is
+// element names are the response's own spelling: camelCase keyTag and
+// digestType and the full-word algorithm. The write request shares keyTag and
+// digestType but abbreviates the third field to alg, so the reply's algorithm
+// and the request's alg are the same field under two names. The asymmetry is
 // the contract, not a bug to fix (§12.1).
 type dsRecordXML struct {
 	Digest     string `xml:"digest"`
-	DigestType string `xml:"digest_type"`
+	DigestType string `xml:"digestType"`
 	Algorithm  string `xml:"algorithm"`
-	KeyTag     string `xml:"key_tag"`
+	KeyTag     string `xml:"keyTag"`
 }
 
 // dnsSecListRecordsReply is the whole dnsSecListRecords reply body.
@@ -62,13 +63,13 @@ func (c *Client) ListDSRecords(ctx context.Context, domain string) ([]DSRecord, 
 		}
 		record := DSRecord{Digest: r.Digest}
 		var err error
-		if record.KeyTag, err = parseDSInt("dnsSecListRecords", "key_tag", r.KeyTag); err != nil {
+		if record.KeyTag, err = parseDSInt("dnsSecListRecords", "keyTag", r.KeyTag); err != nil {
 			return nil, err
 		}
 		if record.Algorithm, err = parseDSInt("dnsSecListRecords", "algorithm", r.Algorithm); err != nil {
 			return nil, err
 		}
-		if record.DigestType, err = parseDSInt("dnsSecListRecords", "digest_type", r.DigestType); err != nil {
+		if record.DigestType, err = parseDSInt("dnsSecListRecords", "digestType", r.DigestType); err != nil {
 			return nil, err
 		}
 		records = append(records, record)

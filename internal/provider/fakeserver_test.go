@@ -49,6 +49,14 @@ type fakeNamesilo struct {
 	// incomplete-list warning (§7).
 	ignorePaging bool
 
+	// staleRoleReads makes getDomainInfo answer the first read after each
+	// contactDomainAssociate with the pre-write roles, modelling the real
+	// API's propagation window. pendingStaleRoles holds that one-shot reply,
+	// keyed by domain. The domain-contacts consistency test turns it on; the
+	// other tests leave it off so propagation is immediate.
+	staleRoleReads    bool
+	pendingStaleRoles map[string]namesilo.ContactRoles
+
 	// nextContactID is the contactAdd ID sequence: the first assigned ID is
 	// 1001.
 	nextContactID int
@@ -85,10 +93,11 @@ type fakeFailure struct {
 // newFakeNamesilo starts the fake server. Callers must Close it.
 func newFakeNamesilo() *fakeNamesilo {
 	f := &fakeNamesilo{
-		domains:       make(map[string]*fakeDomain),
-		failures:      make(map[string]fakeFailure),
-		contacts:      make(map[string]namesilo.Contact),
-		nextContactID: 1000,
+		domains:           make(map[string]*fakeDomain),
+		failures:          make(map[string]fakeFailure),
+		contacts:          make(map[string]namesilo.Contact),
+		pendingStaleRoles: make(map[string]namesilo.ContactRoles),
+		nextContactID:     1000,
 	}
 	f.server = httptest.NewServer(http.HandlerFunc(f.handle))
 	return f
@@ -126,6 +135,16 @@ func (f *fakeNamesilo) setIgnorePaging(ignore bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ignorePaging = ignore
+}
+
+// setStaleRoleReads turns on the propagation-window model: the first
+// getDomainInfo after each contactDomainAssociate answers with the roles as
+// they were before the write, the way the real API lags the association. Later
+// reads answer with the new roles, so a drift self-heals on the next refresh.
+func (f *fakeNamesilo) setStaleRoleReads(stale bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.staleRoleReads = stale
 }
 
 // setForward rewrites one domain's forwarding fields out of band, the way a
@@ -399,6 +418,10 @@ func (f *fakeNamesilo) handleGetDomainInfo(w http.ResponseWriter, operation, dom
 	d, ok := f.domains[domain]
 	if ok {
 		d = cloneFakeDomain(d)
+		if stale, pending := f.pendingStaleRoles[domain]; pending {
+			d.roles = stale
+			delete(f.pendingStaleRoles, domain)
+		}
 	}
 	f.mu.Unlock()
 
@@ -520,9 +543,9 @@ func (f *fakeNamesilo) handleChangeNameServers(w http.ResponseWriter, operation 
 }
 
 // handleDNSSecListRecords renders the domain's DS records in the response's
-// own snake_case shape: digest, digest_type, algorithm, and key_tag. An
-// unsigned domain emits no ds_record element at all, so the reply body is
-// empty and the client's empty-slice contract is exercised end to end.
+// own camelCase shape: digest, digestType, algorithm, and keyTag. An unsigned
+// domain emits no ds_record element at all, so the reply body is empty and the
+// client's empty-slice contract is exercised end to end.
 func (f *fakeNamesilo) handleDNSSecListRecords(w http.ResponseWriter, operation, domain string) {
 	f.mu.Lock()
 	d, ok := f.domains[domain]
@@ -539,9 +562,9 @@ func (f *fakeNamesilo) handleDNSSecListRecords(w http.ResponseWriter, operation,
 	var b strings.Builder
 	for _, record := range d.dsRecords {
 		b.WriteString("<ds_record>")
-		b.WriteString("<key_tag>" + strconv.FormatInt(record.KeyTag, 10) + "</key_tag>")
+		b.WriteString("<keyTag>" + strconv.FormatInt(record.KeyTag, 10) + "</keyTag>")
 		b.WriteString("<algorithm>" + strconv.FormatInt(record.Algorithm, 10) + "</algorithm>")
-		b.WriteString("<digest_type>" + strconv.FormatInt(record.DigestType, 10) + "</digest_type>")
+		b.WriteString("<digestType>" + strconv.FormatInt(record.DigestType, 10) + "</digestType>")
 		b.WriteString("<digest>" + xmlEscape(record.Digest) + "</digest>")
 		b.WriteString("</ds_record>")
 	}
@@ -805,7 +828,9 @@ func contactFromQuery(query map[string][]string) namesilo.Contact {
 
 // contactReply renders one <contact> element. Every field is emitted; unset
 // optionals arrive as empty elements, the shape the client normalizes to empty
-// strings. default_profile is always the strict 1/0 the client requires.
+// strings. default_profile is always the strict 1/0 the client requires. The
+// element names are the reply's full snake_case names, not the request's short
+// parameter names: the reply and the request spell the same fields differently.
 func contactReply(contact namesilo.Contact) string {
 	defaultProfile := "0"
 	if contact.DefaultProfile {
@@ -815,26 +840,26 @@ func contactReply(contact namesilo.Contact) string {
 	b.WriteString("<contact>")
 	b.WriteString("<contact_id>" + xmlEscape(contact.ID) + "</contact_id>")
 	b.WriteString("<default_profile>" + defaultProfile + "</default_profile>")
-	b.WriteString("<nn>" + xmlEscape(contact.Nickname) + "</nn>")
-	b.WriteString("<cp>" + xmlEscape(contact.Company) + "</cp>")
-	b.WriteString("<fn>" + xmlEscape(contact.FirstName) + "</fn>")
-	b.WriteString("<ln>" + xmlEscape(contact.LastName) + "</ln>")
-	b.WriteString("<ad>" + xmlEscape(contact.Address) + "</ad>")
-	b.WriteString("<ad2>" + xmlEscape(contact.Address2) + "</ad2>")
-	b.WriteString("<cy>" + xmlEscape(contact.City) + "</cy>")
-	b.WriteString("<st>" + xmlEscape(contact.State) + "</st>")
-	b.WriteString("<zp>" + xmlEscape(contact.Zip) + "</zp>")
-	b.WriteString("<ct>" + xmlEscape(contact.Country) + "</ct>")
-	b.WriteString("<em>" + xmlEscape(contact.Email) + "</em>")
-	b.WriteString("<ph>" + xmlEscape(contact.Phone) + "</ph>")
-	b.WriteString("<fx>" + xmlEscape(contact.Fax) + "</fx>")
-	b.WriteString("<usnc>" + xmlEscape(contact.UsNexusCategory) + "</usnc>")
-	b.WriteString("<usap>" + xmlEscape(contact.UsApplicationPurpose) + "</usap>")
-	b.WriteString("<calf>" + xmlEscape(contact.CaLegalForm) + "</calf>")
-	b.WriteString("<caln>" + xmlEscape(contact.CaLanguage) + "</caln>")
-	b.WriteString("<caag>" + xmlEscape(contact.CaAgreementVersion) + "</caag>")
-	b.WriteString("<cawd>" + xmlEscape(contact.CaWhoisDisplay) + "</cawd>")
-	b.WriteString("<eucs>" + xmlEscape(contact.EuCitizenshipCountry) + "</eucs>")
+	b.WriteString("<nickname>" + xmlEscape(contact.Nickname) + "</nickname>")
+	b.WriteString("<company>" + xmlEscape(contact.Company) + "</company>")
+	b.WriteString("<first_name>" + xmlEscape(contact.FirstName) + "</first_name>")
+	b.WriteString("<last_name>" + xmlEscape(contact.LastName) + "</last_name>")
+	b.WriteString("<address>" + xmlEscape(contact.Address) + "</address>")
+	b.WriteString("<address2>" + xmlEscape(contact.Address2) + "</address2>")
+	b.WriteString("<city>" + xmlEscape(contact.City) + "</city>")
+	b.WriteString("<state>" + xmlEscape(contact.State) + "</state>")
+	b.WriteString("<zip>" + xmlEscape(contact.Zip) + "</zip>")
+	b.WriteString("<country>" + xmlEscape(contact.Country) + "</country>")
+	b.WriteString("<email>" + xmlEscape(contact.Email) + "</email>")
+	b.WriteString("<phone>" + xmlEscape(contact.Phone) + "</phone>")
+	b.WriteString("<fax>" + xmlEscape(contact.Fax) + "</fax>")
+	b.WriteString("<us_nexus_category>" + xmlEscape(contact.UsNexusCategory) + "</us_nexus_category>")
+	b.WriteString("<us_application_purpose>" + xmlEscape(contact.UsApplicationPurpose) + "</us_application_purpose>")
+	b.WriteString("<ca_legal_form>" + xmlEscape(contact.CaLegalForm) + "</ca_legal_form>")
+	b.WriteString("<ca_language>" + xmlEscape(contact.CaLanguage) + "</ca_language>")
+	b.WriteString("<ca_agreement_version>" + xmlEscape(contact.CaAgreementVersion) + "</ca_agreement_version>")
+	b.WriteString("<ca_whois_display>" + xmlEscape(contact.CaWhoisDisplay) + "</ca_whois_display>")
+	b.WriteString("<eu_citizenship_country>" + xmlEscape(contact.EuCitizenshipCountry) + "</eu_citizenship_country>")
 	b.WriteString("</contact>")
 	return b.String()
 }
@@ -933,6 +958,9 @@ func (f *fakeNamesilo) handleContactDomainAssociate(w http.ResponseWriter, opera
 	f.mu.Lock()
 	d, ok := f.domains[domain]
 	if ok {
+		if f.staleRoleReads {
+			f.pendingStaleRoles[domain] = d.roles
+		}
 		if v := firstValue(query, "registrant"); v != "" {
 			d.roles.Registrant = v
 		}

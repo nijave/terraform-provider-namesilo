@@ -35,6 +35,16 @@ var (
 // resource stops managing the associations and leaves them in place: the API
 // has no disassociate operation and a domain must always have all four roles
 // (§4 invariant 10).
+//
+// contactDomainAssociate succeeds before its change is visible in
+// getDomainInfo: the association propagates over several seconds, so a read
+// taken immediately after the write can still report the old role. Create and
+// Update therefore never trust a post-write getDomainInfo for the roles they
+// just set — they take those from the plan, which already carries what was
+// written. Read remains the authority and refreshes all four roles; drift that
+// this leaves in state (an out-of-band change between refreshes) self-heals on
+// the next refresh rather than being reported as an inconsistent result after
+// apply.
 type domainContactsResource struct {
 	client *namesilo.Client
 }
@@ -162,11 +172,17 @@ func (r *domainContactsResource) Configure(_ context.Context, req resource.Confi
 }
 
 // Create sends the roles that are present in configuration in one
-// contactDomainAssociate call, then stores the refreshed state. The omitted
-// roles are Computed, so they are filled from getDomainInfo's contact_ids
-// before state is returned: OpenTofu requires every value to be known after
-// apply, so leaving them unknown for the framework's refresh to resolve is
-// rejected.
+// contactDomainAssociate call. The managed roles take their planned
+// (configuration) values into the response state; the omitted roles are
+// Computed and unknown in the plan, so they are filled from one getDomainInfo
+// call before state is returned: OpenTofu requires every value to be known
+// after apply, so leaving them unknown for the framework's refresh to resolve
+// is rejected.
+//
+// The managed roles come from the plan rather than from that getDomainInfo
+// call because the association write propagates over several seconds (see the
+// resource comment): re-reading immediately can return the old role and make
+// the provider produce a result that disagrees with the plan.
 func (r *domainContactsResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan domainContactsResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -187,7 +203,7 @@ func (r *domainContactsResource) Create(ctx context.Context, req resource.Create
 	}
 
 	plan.ID = plan.Domain
-	if err := r.refreshRoles(ctx, &plan); err != nil {
+	if err := r.fillUnmanagedRoles(ctx, &config, &plan); err != nil {
 		addAPIError(&resp.Diagnostics, "namesilo_domain_contacts", err)
 		return
 	}
@@ -212,12 +228,12 @@ func (r *domainContactsResource) Read(ctx context.Context, req resource.ReadRequ
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-// refreshRoles fills all four role attributes from getDomainInfo's contact_ids,
-// the read Read performs. Create and Update call it after their write so state
-// is complete before it is returned: the association call returns no contacts,
-// and OpenTofu requires every attribute to be known after apply. Null and
-// unknown input values are overwritten, so the caller's managed roles are
-// replaced by the API's authoritative values.
+// refreshRoles fills all four role attributes from getDomainInfo's contact_ids.
+// It is Read's refresh, and Read is the authority for out-of-band changes.
+// Create and Update do not call it for the roles they just wrote: the write's
+// propagation is not immediate (see the resource comment). Null and unknown
+// input values are overwritten, so every role in the caller's model becomes the
+// API's current value.
 func (r *domainContactsResource) refreshRoles(ctx context.Context, model *domainContactsResourceModel) error {
 	info, err := r.client.GetDomainInfo(ctx, model.Domain.ValueString())
 	if err != nil {
@@ -230,10 +246,47 @@ func (r *domainContactsResource) refreshRoles(ctx context.Context, model *domain
 	return nil
 }
 
+// fillUnmanagedRoles fills only the roles the configuration leaves unmanaged
+// (null in config, and therefore unknown in a Create plan) from one
+// getDomainInfo call, leaving the managed roles at the plan's configured
+// values. It makes no call when every role is configured. Create calls it after
+// the associate write; Update does not, because Update keeps the plan's values
+// for all four roles and lets the next Read pick up anything that changed out
+// of band.
+func (r *domainContactsResource) fillUnmanagedRoles(ctx context.Context, config, plan *domainContactsResourceModel) error {
+	if !config.Registrant.IsNull() && !config.Administrative.IsNull() &&
+		!config.Technical.IsNull() && !config.Billing.IsNull() {
+		return nil
+	}
+	info, err := r.client.GetDomainInfo(ctx, plan.Domain.ValueString())
+	if err != nil {
+		return err
+	}
+	if config.Registrant.IsNull() {
+		plan.Registrant = nullIfEmpty(info.Contacts.Registrant)
+	}
+	if config.Administrative.IsNull() {
+		plan.Administrative = nullIfEmpty(info.Contacts.Administrative)
+	}
+	if config.Technical.IsNull() {
+		plan.Technical = nullIfEmpty(info.Contacts.Technical)
+	}
+	if config.Billing.IsNull() {
+		plan.Billing = nullIfEmpty(info.Contacts.Billing)
+	}
+	return nil
+}
+
 // Update sends only the roles present in configuration, with the plan's
 // values. A role that was dropped from configuration is not sent: omitting a
 // role leaves the API's association untouched, which is the only thing the API
 // supports. A change to domain plans a replacement, so Update never sees one.
+//
+// It does not call getDomainInfo after the write. The plan already carries the
+// managed roles from configuration and the unmanaged roles from prior state,
+// so all four values are known; keeping them avoids the stale read the write's
+// propagation window would produce. The next Read is the authority and picks
+// up any out-of-band change then.
 func (r *domainContactsResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var plan domainContactsResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -254,10 +307,6 @@ func (r *domainContactsResource) Update(ctx context.Context, req resource.Update
 	}
 
 	plan.ID = plan.Domain
-	if err := r.refreshRoles(ctx, &plan); err != nil {
-		addAPIError(&resp.Diagnostics, "namesilo_domain_contacts", err)
-		return
-	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
