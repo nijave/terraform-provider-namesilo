@@ -76,7 +76,10 @@ func (c *Client) call(ctx context.Context, operation string, params map[string]s
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s: request failed: %w", operation, err)
+		// http.Client.Do returns a *url.Error whose text embeds the full
+		// request URL, and the URL's query carries the API key, so the cause
+		// is deliberately dropped rather than wrapped or echoed.
+		return fmt.Errorf("%s: request failed", operation)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

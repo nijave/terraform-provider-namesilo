@@ -198,6 +198,9 @@ func TestErrorsNeverContainTheAPIKey(t *testing.T) {
 	shapes := []struct {
 		name    string
 		handler http.HandlerFunc
+		// prepare, when set, runs after the server is created and may stop it
+		// to force a transport failure.
+		prepare func(*httptest.Server)
 	}{
 		{
 			name: "HTTP 500",
@@ -217,12 +220,24 @@ func TestErrorsNeverContainTheAPIKey(t *testing.T) {
 				writeReply(w, "110", "Invalid API key")
 			},
 		},
+		{
+			// Closing the server forces a transport failure. http.Client.Do
+			// returns a *url.Error whose text embeds the full request URL,
+			// whose query carries the key, so this shape pins the redaction
+			// contract on the path where the leak actually happened.
+			name:    "connection refused",
+			handler: func(w http.ResponseWriter, r *http.Request) {},
+			prepare: func(srv *httptest.Server) { srv.Close() },
+		},
 	}
 
 	for _, shape := range shapes {
 		t.Run(shape.name, func(t *testing.T) {
 			srv := httptest.NewServer(shape.handler)
 			defer srv.Close()
+			if shape.prepare != nil {
+				shape.prepare(srv)
+			}
 			c := NewClient(srv.URL, apiKey, "test")
 
 			err := c.call(context.Background(), "probe", map[string]string{"domain": "example.com"}, nil)
@@ -231,6 +246,9 @@ func TestErrorsNeverContainTheAPIKey(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), apiKey) {
 				t.Fatalf("error leaks the API key: %q", err)
+			}
+			if strings.Contains(err.Error(), srv.URL) {
+				t.Errorf("error leaks the request URL: %q", err)
 			}
 		})
 	}
