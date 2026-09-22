@@ -80,6 +80,8 @@ func (p *namesiloProvider) Resources(_ context.Context) []func() resource.Resour
 		NewNameserversResource,
 		NewDNSSecRecordsResource,
 		NewPrivacyResource,
+		NewDomainLockResource,
+		NewAutoRenewResource,
 	}
 }
 

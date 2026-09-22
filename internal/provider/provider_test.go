@@ -37,6 +37,8 @@ var expectedResourceTypes = []string{
 	"namesilo_nameservers",
 	"namesilo_dnssec_records",
 	"namesilo_privacy",
+	"namesilo_domain_lock",
+	"namesilo_auto_renew",
 }
 
 // expectedDataSourceTypes lists every data source type the harness tests must

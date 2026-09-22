@@ -134,6 +134,32 @@ func (f *fakeNamesilo) setPrivate(name string, private bool) {
 	}
 }
 
+// setLocked flips one domain's registrar lock out of band, the way a change in
+// NameSilo's web UI would. The lock drift tests call it from PreConfig; the
+// already-in-state tests call it from a PreApply plan check, which runs after
+// the plan but before the apply, so the toggle's call lands on the real
+// handler's already-in-state reply.
+func (f *fakeNamesilo) setLocked(name string, locked bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if d, ok := f.domains[name]; ok {
+		d.locked = locked
+	}
+}
+
+// setAutoRenew flips one domain's auto-renew flag out of band, the way a
+// change in NameSilo's web UI would. The auto-renew drift tests call it from
+// PreConfig; the already-in-state tests call it from a PreApply plan check,
+// which runs after the plan but before the apply, so the toggle's call lands
+// on the real handler's already-in-state reply.
+func (f *fakeNamesilo) setAutoRenew(name string, autoRenew bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if d, ok := f.domains[name]; ok {
+		d.autoRenew = autoRenew
+	}
+}
+
 // dsRecordsFor returns a copy of one domain's DS records, so a CheckDestroy
 // can assert the destroy left none behind without racing a handler.
 func (f *fakeNamesilo) dsRecordsFor(name string) []namesilo.DSRecord {
@@ -227,6 +253,14 @@ func (f *fakeNamesilo) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleAddPrivacy(w, "addPrivacy", query.Get("domain"))
 	case "removePrivacy":
 		f.handleRemovePrivacy(w, "removePrivacy", query.Get("domain"))
+	case "domainLock":
+		f.handleDomainLock(w, "domainLock", query.Get("domain"))
+	case "domainUnlock":
+		f.handleDomainUnlock(w, "domainUnlock", query.Get("domain"))
+	case "addAutoRenewal":
+		f.handleAddAutoRenewal(w, "addAutoRenewal", query.Get("domain"))
+	case "removeAutoRenewal":
+		f.handleRemoveAutoRenewal(w, "removeAutoRenewal", query.Get("domain"))
 	default:
 		writeReply(w, operation, "400", "unsupported operation "+operation, "")
 	}
@@ -460,6 +494,101 @@ func (f *fakeNamesilo) handleRemovePrivacy(w http.ResponseWriter, operation, dom
 	}
 	if alreadyNotPrivate {
 		writeReply(w, operation, "256", "Domain is already not private", "")
+		return
+	}
+	writeReply(w, operation, "300", "success", "")
+}
+
+// handleDomainLock locks the domain against transfer. A domain that is already
+// locked answers with the real API's code 252 ("Domain is already locked")
+// instead of 300, which is what exercises the client's alreadyInState
+// classification and the resource's idempotence against a race with the web
+// UI (§12.2).
+func (f *fakeNamesilo) handleDomainLock(w http.ResponseWriter, operation, domain string) {
+	f.mu.Lock()
+	d, ok := f.domains[domain]
+	alreadyLocked := ok && d.locked
+	if ok && !d.locked {
+		d.locked = true
+	}
+	f.mu.Unlock()
+
+	if !ok {
+		writeReply(w, operation, "200", "Domain is not active, or does not belong to this user", "")
+		return
+	}
+	if alreadyLocked {
+		writeReply(w, operation, "252", "Domain is already locked", "")
+		return
+	}
+	writeReply(w, operation, "300", "success", "")
+}
+
+// handleDomainUnlock unlocks the domain. It is symmetric with handleDomainLock:
+// a domain that is not locked answers code 253 ("Domain is already unlocked")
+// instead of 300.
+func (f *fakeNamesilo) handleDomainUnlock(w http.ResponseWriter, operation, domain string) {
+	f.mu.Lock()
+	d, ok := f.domains[domain]
+	alreadyUnlocked := ok && !d.locked
+	if ok && d.locked {
+		d.locked = false
+	}
+	f.mu.Unlock()
+
+	if !ok {
+		writeReply(w, operation, "200", "Domain is not active, or does not belong to this user", "")
+		return
+	}
+	if alreadyUnlocked {
+		writeReply(w, operation, "253", "Domain is already unlocked", "")
+		return
+	}
+	writeReply(w, operation, "300", "success", "")
+}
+
+// handleAddAutoRenewal turns auto-renewal on. A domain that already has
+// auto-renew answers with the real API's code 250 ("Domain is already set to
+// AutoRenew") instead of 300, exercising the client's alreadyInState
+// classification the same way the privacy handlers do.
+func (f *fakeNamesilo) handleAddAutoRenewal(w http.ResponseWriter, operation, domain string) {
+	f.mu.Lock()
+	d, ok := f.domains[domain]
+	alreadyAutoRenew := ok && d.autoRenew
+	if ok && !d.autoRenew {
+		d.autoRenew = true
+	}
+	f.mu.Unlock()
+
+	if !ok {
+		writeReply(w, operation, "200", "Domain is not active, or does not belong to this user", "")
+		return
+	}
+	if alreadyAutoRenew {
+		writeReply(w, operation, "250", "Domain is already set to AutoRenew", "")
+		return
+	}
+	writeReply(w, operation, "300", "success", "")
+}
+
+// handleRemoveAutoRenewal turns auto-renewal off. It is symmetric with
+// handleAddAutoRenewal: a domain without auto-renew answers code 251 ("Domain
+// is already set not to AutoRenew") instead of 300.
+func (f *fakeNamesilo) handleRemoveAutoRenewal(w http.ResponseWriter, operation, domain string) {
+	f.mu.Lock()
+	d, ok := f.domains[domain]
+	alreadyNotAutoRenew := ok && !d.autoRenew
+	if ok && d.autoRenew {
+		d.autoRenew = false
+	}
+	f.mu.Unlock()
+
+	if !ok {
+		writeReply(w, operation, "200", "Domain is not active, or does not belong to this user", "")
+		return
+	}
+	if alreadyNotAutoRenew {
+		writeReply(w, operation, "251", "Domain is already set not to AutoRenew", "")
 		return
 	}
 	writeReply(w, operation, "300", "success", "")
