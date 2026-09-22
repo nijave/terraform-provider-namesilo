@@ -79,6 +79,7 @@ func (p *namesiloProvider) Resources(_ context.Context) []func() resource.Resour
 	return []func() resource.Resource{
 		NewNameserversResource,
 		NewDNSSecRecordsResource,
+		NewPrivacyResource,
 	}
 }
 

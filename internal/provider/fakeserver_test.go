@@ -121,6 +121,19 @@ func (f *fakeNamesilo) setDSRecords(name string, records []namesilo.DSRecord) {
 	}
 }
 
+// setPrivate flips one domain's WHOIS privacy out of band, the way a change in
+// NameSilo's web UI would. The privacy drift tests call it from PreConfig; the
+// already-in-state tests call it from a PreApply plan check, which runs after
+// the plan but before the apply, so the toggle's call lands on the real
+// handler's already-in-state reply.
+func (f *fakeNamesilo) setPrivate(name string, private bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if d, ok := f.domains[name]; ok {
+		d.private = private
+	}
+}
+
 // dsRecordsFor returns a copy of one domain's DS records, so a CheckDestroy
 // can assert the destroy left none behind without racing a handler.
 func (f *fakeNamesilo) dsRecordsFor(name string) []namesilo.DSRecord {
@@ -210,6 +223,10 @@ func (f *fakeNamesilo) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleDNSSecAddRecord(w, "dnsSecAddRecord", query)
 	case "dnsSecDeleteRecord":
 		f.handleDNSSecDeleteRecord(w, "dnsSecDeleteRecord", query)
+	case "addPrivacy":
+		f.handleAddPrivacy(w, "addPrivacy", query.Get("domain"))
+	case "removePrivacy":
+		f.handleRemovePrivacy(w, "removePrivacy", query.Get("domain"))
 	default:
 		writeReply(w, operation, "400", "unsupported operation "+operation, "")
 	}
@@ -396,6 +413,53 @@ func (f *fakeNamesilo) handleDNSSecDeleteRecord(w http.ResponseWriter, operation
 
 	if !ok {
 		writeReply(w, operation, "200", "Domain is not active, or does not belong to this user", "")
+		return
+	}
+	writeReply(w, operation, "300", "success", "")
+}
+
+// handleAddPrivacy turns WHOIS privacy on. A domain that is already private
+// answers with the real API's code 255 ("Domain is already private") instead
+// of 300, which is what exercises the client's alreadyInState classification
+// and the resource's idempotence against a race with the web UI (§12.2).
+func (f *fakeNamesilo) handleAddPrivacy(w http.ResponseWriter, operation, domain string) {
+	f.mu.Lock()
+	d, ok := f.domains[domain]
+	alreadyPrivate := ok && d.private
+	if ok && !d.private {
+		d.private = true
+	}
+	f.mu.Unlock()
+
+	if !ok {
+		writeReply(w, operation, "200", "Domain is not active, or does not belong to this user", "")
+		return
+	}
+	if alreadyPrivate {
+		writeReply(w, operation, "255", "Domain is already private", "")
+		return
+	}
+	writeReply(w, operation, "300", "success", "")
+}
+
+// handleRemovePrivacy turns WHOIS privacy off. It is symmetric with
+// handleAddPrivacy: a domain that is not private answers code 256 ("Domain is
+// already not private") instead of 300.
+func (f *fakeNamesilo) handleRemovePrivacy(w http.ResponseWriter, operation, domain string) {
+	f.mu.Lock()
+	d, ok := f.domains[domain]
+	alreadyNotPrivate := ok && !d.private
+	if ok && d.private {
+		d.private = false
+	}
+	f.mu.Unlock()
+
+	if !ok {
+		writeReply(w, operation, "200", "Domain is not active, or does not belong to this user", "")
+		return
+	}
+	if alreadyNotPrivate {
+		writeReply(w, operation, "256", "Domain is already not private", "")
 		return
 	}
 	writeReply(w, operation, "300", "success", "")
