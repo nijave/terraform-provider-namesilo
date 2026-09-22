@@ -6,6 +6,7 @@ description: |-
   Manages a contact profile — an account-level record identified by its contact_id. A domain references profiles by ID in four roles: registrant, administrative, technical, and billing. A profile is not owned by a domain, so profiles and their associations are separate resources (§6.4).
   Create makes a new profile every time an apply starts from a create; there is no name-based adoption, so importing by contact_id is the only way to take over an existing profile.
   Every attribute that describes the contact person is Sensitive. That masks the value in CLI output only: the data still lives in the state file, so treat that file as personal data. Practitioners who want stronger masking can add sensitive = true to their own contact input variables.
+  Write the canonical form the API stores: country is an uppercase two-letter code, and the optional string attributes are omitted rather than set to an empty string. On an update the provider normalizes these to the API's shape, so an existing state converges; on create there is nothing to normalize against, so a non-canonical value is rejected at plan time.
   Destroying the resource deletes the profile. The API refuses to delete a profile still associated with a domain, and the account's default profile cannot be deleted; the error is surfaced unchanged, and the fix is to reassign the domain's contacts first — which is what the dependency graph expresses when a domain's contacts reference this resource.
 ---
 
@@ -16,6 +17,8 @@ Manages a contact profile — an account-level record identified by its `contact
 Create makes a new profile every time an apply starts from a create; there is no name-based adoption, so importing by `contact_id` is the only way to take over an existing profile.
 
 Every attribute that describes the contact person is `Sensitive`. That masks the value in CLI output only: the data still lives in the state file, so treat that file as personal data. Practitioners who want stronger masking can add `sensitive = true` to their own contact input variables.
+
+Write the canonical form the API stores: `country` is an uppercase two-letter code, and the optional string attributes are omitted rather than set to an empty string. On an update the provider normalizes these to the API's shape, so an existing state converges; on create there is nothing to normalize against, so a non-canonical value is rejected at plan time.
 
 Destroying the resource deletes the profile. The API refuses to delete a profile still associated with a domain, and the account's default profile cannot be deleted; the error is surfaced unchanged, and the fix is to reassign the domain's contacts first — which is what the dependency graph expresses when a domain's contacts reference this resource.
 
@@ -46,7 +49,7 @@ output "contact_id" {
 
 - `address` (String, Sensitive) The registrant's street address.
 - `city` (String, Sensitive) The registrant's city.
-- `country` (String, Sensitive) The registrant's country as an ISO 3166-1 alpha-2 code, e.g. `US` or `GB`. Exactly two characters. It is uppercased at plan time, so a lowercase code does not diff against the API's uppercase value.
+- `country` (String, Sensitive) The registrant's country as an ISO 3166-1 alpha-2 code, e.g. `US` or `GB`. Must be exactly two uppercase letters; any other case is rejected at plan time. Normalization to uppercase applies on update, not on create: an update against existing state converges, while a create needs the canonical uppercase form.
 - `email` (String, Sensitive) The registrant's email address. NameSilo sends contact verification and renewal notices here.
 - `first_name` (String, Sensitive) The registrant's first name.
 - `last_name` (String, Sensitive) The registrant's last name.
@@ -56,14 +59,14 @@ output "contact_id" {
 
 ### Optional
 
-- `address2` (String, Sensitive) The second line of the registrant's street address, e.g. a suite or apartment number. Optional; the API reports it as an empty element when unset, which this resource stores as null.
+- `address2` (String, Sensitive) The second line of the registrant's street address, e.g. a suite or apartment number. Optional; the API reports it as an empty element when unset, which this resource stores as null. Omit it instead of setting an empty string.
 - `ca_agreement_version` (String, Sensitive) The CIRA registrant agreement version accepted for a `.ca` registrant. Optional.
 - `ca_language` (String, Sensitive) The preferred correspondence language for a `.ca` registrant. Optional.
 - `ca_legal_form` (String, Sensitive) The legal form CIRA requires for a `.ca` registrant. Optional.
 - `ca_whois_display` (String, Sensitive) The CIRA WHOIS display preference for a `.ca` registrant. Optional.
-- `company` (String, Sensitive) The registrant's company name. Optional.
+- `company` (String, Sensitive) The registrant's company name. Optional; omit it instead of setting an empty string.
 - `eu_citizenship_country` (String, Sensitive) The citizenship country a `.eu` registrant qualifies under. Optional.
-- `fax` (String, Sensitive) The registrant's fax number. Optional.
+- `fax` (String, Sensitive) The registrant's fax number. Optional; omit it instead of setting an empty string.
 - `nickname` (String, Sensitive) A label for the profile in NameSilo's UI. Optional, and informational: it does not appear in WHOIS output.
 - `us_application_purpose` (String, Sensitive) The US application purpose for a `.us` registrant, e.g. `P1`. Optional; needed only for `.us` domains.
 - `us_nexus_category` (String, Sensitive) The US Nexus category for a `.us` registrant, e.g. `C11`. Optional; needed only for `.us` domains.

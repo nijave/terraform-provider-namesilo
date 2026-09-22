@@ -8,9 +8,11 @@ package namesilo
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -56,13 +58,14 @@ type replyHeader struct {
 // verbatim (empty values included), and out, when non-nil, receives the whole
 // XML body so an operation can decode its own fields.
 //
-// Errors are built from the operation, the reply code, the detail, and the
-// HTTP status only, never from the request URL or its query, so the API key
-// cannot leak into a diagnostic.
+// Errors are built from the operation, the reply code, the detail, the HTTP
+// status, and (for a transport or request-build failure) the inner cause
+// only — never from the request URL or its query, so the API key cannot leak
+// into a diagnostic.
 func (c *Client) call(ctx context.Context, operation string, params map[string]string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+"/"+operation, nil)
 	if err != nil {
-		return fmt.Errorf("%s: building the request: %w", operation, err)
+		return fmt.Errorf("%s: building the request: %s", operation, redactedCause(err))
 	}
 	q := req.URL.Query()
 	q.Set("version", "1")
@@ -76,10 +79,11 @@ func (c *Client) call(ctx context.Context, operation string, params map[string]s
 
 	resp, err := c.http.Do(req)
 	if err != nil {
+		// A transport failure's cause (timeout, DNS, TLS) is useful, but
 		// http.Client.Do returns a *url.Error whose text embeds the full
-		// request URL, and the URL's query carries the API key, so the cause
-		// is deliberately dropped rather than wrapped or echoed.
-		return fmt.Errorf("%s: request failed", operation)
+		// request URL, and the URL's query carries the API key. Only the
+		// inner cause is formatted, never the *url.Error itself.
+		return fmt.Errorf("%s: request failed: %s", operation, redactedCause(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -108,4 +112,21 @@ func (c *Client) call(ctx context.Context, operation string, params map[string]s
 		return fmt.Errorf("%s: decoding the XML reply: %w", operation, err)
 	}
 	return nil
+}
+
+// redactedCause returns the inner cause of a request error without the URL.
+// http.Client.Do and url.Parse wrap their failures in *url.Error, whose text is
+// "<op> <url>: <cause>": formatting it would echo the request URL, whose query
+// carries the API key. The inner cause is both safe and the part an operator
+// needs — "context deadline exceeded", "dial tcp: lookup ...", or the parse
+// failure. A non-url error falls back to its own text.
+func redactedCause(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		if ue.Err != nil {
+			return ue.Err.Error()
+		}
+		return "unknown request error"
+	}
+	return err.Error()
 }

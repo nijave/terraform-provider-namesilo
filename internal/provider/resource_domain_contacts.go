@@ -11,6 +11,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"github.com/nijave/terraform-provider-namesilo/internal/namesilo"
@@ -90,9 +91,11 @@ func (r *domainContactsResource) Schema(_ context.Context, _ resource.SchemaRequ
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.UseStateForUnknown(),
 				},
+				Validators: []validator.String{nonEmptyString()},
 				MarkdownDescription: "The `contact_id` of the registrant profile. Optional; when it " +
 					"is omitted the role is left alone and the API's current value is stored as " +
-					"computed. The registrant is the role most likely to be restricted: changing it " +
+					"computed. Omitting it is how to stop managing the role; do not set an empty " +
+					"string. The registrant is the role most likely to be restricted: changing it " +
 					"can trigger a registry contact-verification email and, for some TLDs, is rejected " +
 					"outright, with the API error surfaced unchanged.",
 			},
@@ -102,9 +105,10 @@ func (r *domainContactsResource) Schema(_ context.Context, _ resource.SchemaRequ
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.UseStateForUnknown(),
 				},
+				Validators: []validator.String{nonEmptyString()},
 				MarkdownDescription: "The `contact_id` of the administrative profile. Optional; " +
 					"when it is omitted the role is left alone and the API's current value is stored " +
-					"as computed.",
+					"as computed. Omit it to stop managing the role; an empty string is rejected.",
 			},
 			"technical": schema.StringAttribute{
 				Optional: true,
@@ -112,9 +116,10 @@ func (r *domainContactsResource) Schema(_ context.Context, _ resource.SchemaRequ
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.UseStateForUnknown(),
 				},
+				Validators: []validator.String{nonEmptyString()},
 				MarkdownDescription: "The `contact_id` of the technical profile. Optional; when it " +
 					"is omitted the role is left alone and the API's current value is stored as " +
-					"computed.",
+					"computed. Omit it to stop managing the role; an empty string is rejected.",
 			},
 			"billing": schema.StringAttribute{
 				Optional: true,
@@ -122,8 +127,10 @@ func (r *domainContactsResource) Schema(_ context.Context, _ resource.SchemaRequ
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.UseStateForUnknown(),
 				},
+				Validators: []validator.String{nonEmptyString()},
 				MarkdownDescription: "The `contact_id` of the billing profile. Optional; when it is " +
-					"omitted the role is left alone and the API's current value is stored as computed.",
+					"omitted the role is left alone and the API's current value is stored as computed. " +
+					"Omit it to stop managing the role; an empty string is rejected.",
 			},
 			"id": schema.StringAttribute{
 				Computed: true,

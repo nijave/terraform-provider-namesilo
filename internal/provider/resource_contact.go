@@ -5,6 +5,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -25,6 +26,12 @@ var (
 	_ resource.ResourceWithImportState = (*contactResource)(nil)
 	_ resource.ResourceWithModifyPlan  = (*contactResource)(nil)
 )
+
+// iso3166Alpha2Pattern matches an uppercase ISO 3166-1 alpha-2 country code:
+// exactly two uppercase ASCII letters. Lowercase is rejected at validate time
+// rather than normalized, because OpenTofu core forbids the provider from
+// changing a known configured value at plan time on create (see ModifyPlan).
+var iso3166Alpha2Pattern = regexp.MustCompile(`^[A-Z]{2}$`)
 
 // contactResource manages one account-level contact profile. A profile is
 // identified by the API's contact_id and is not owned by a domain: a domain
@@ -85,6 +92,11 @@ func (r *contactResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"CLI output only: the data still lives in the state file, so treat that file as personal " +
 			"data. Practitioners who want stronger masking can add `sensitive = true` to their own " +
 			"contact input variables.\n\n" +
+			"Write the canonical form the API stores: `country` is an uppercase two-letter code, and " +
+			"the optional string attributes are omitted rather than set to an empty string. On an " +
+			"update the provider normalizes these to the API's shape, so an existing state converges; " +
+			"on create there is nothing to normalize against, so a non-canonical value is rejected at " +
+			"plan time.\n\n" +
 			"Destroying the resource deletes the profile. The API refuses to delete a profile still " +
 			"associated with a domain, and the account's default profile cannot be deleted; the error " +
 			"is surfaced unchanged, and the fix is to reassign the domain's contacts first — which is " +
@@ -109,12 +121,15 @@ func (r *contactResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				MarkdownDescription: "The registrant's street address.",
 			},
 			"address2": schema.StringAttribute{
-				Optional:   true,
-				Sensitive:  true,
-				Validators: []validator.String{stringvalidator.LengthAtMost(128)},
+				Optional:  true,
+				Sensitive: true,
+				Validators: []validator.String{
+					stringvalidator.LengthAtMost(128),
+					nonEmptyString(),
+				},
 				MarkdownDescription: "The second line of the registrant's street address, e.g. a suite " +
 					"or apartment number. Optional; the API reports it as an empty element when unset, " +
-					"which this resource stores as null.",
+					"which this resource stores as null. Omit it instead of setting an empty string.",
 			},
 			"city": schema.StringAttribute{
 				Required:            true,
@@ -138,11 +153,13 @@ func (r *contactResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Required:  true,
 				Sensitive: true,
 				Validators: []validator.String{
-					stringvalidator.LengthBetween(2, 2),
+					stringvalidator.RegexMatches(iso3166Alpha2Pattern,
+						"use an uppercase two-letter ISO 3166-1 alpha-2 country code, e.g. US or GB"),
 				},
 				MarkdownDescription: "The registrant's country as an ISO 3166-1 alpha-2 code, e.g. `US` " +
-					"or `GB`. Exactly two characters. It is uppercased at plan time, so a lowercase " +
-					"code does not diff against the API's uppercase value.",
+					"or `GB`. Must be exactly two uppercase letters; any other case is rejected at plan " +
+					"time. Normalization to uppercase applies on update, not on create: an update " +
+					"against existing state converges, while a create needs the canonical uppercase form.",
 			},
 			"email": schema.StringAttribute{
 				Required:   true,
@@ -158,21 +175,32 @@ func (r *contactResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				MarkdownDescription: "The registrant's phone number, including the country code.",
 			},
 			"fax": schema.StringAttribute{
-				Optional:            true,
-				Sensitive:           true,
-				Validators:          []validator.String{stringvalidator.LengthAtMost(32)},
-				MarkdownDescription: "The registrant's fax number. Optional.",
+				Optional:  true,
+				Sensitive: true,
+				Validators: []validator.String{
+					stringvalidator.LengthAtMost(32),
+					nonEmptyString(),
+				},
+				MarkdownDescription: "The registrant's fax number. Optional; omit it instead of " +
+					"setting an empty string.",
 			},
 			"company": schema.StringAttribute{
-				Optional:            true,
-				Sensitive:           true,
-				Validators:          []validator.String{stringvalidator.LengthAtMost(64)},
-				MarkdownDescription: "The registrant's company name. Optional.",
+				Optional:  true,
+				Sensitive: true,
+				Validators: []validator.String{
+					stringvalidator.LengthAtMost(64),
+					nonEmptyString(),
+				},
+				MarkdownDescription: "The registrant's company name. Optional; omit it instead of " +
+					"setting an empty string.",
 			},
 			"nickname": schema.StringAttribute{
-				Optional:   true,
-				Sensitive:  true,
-				Validators: []validator.String{stringvalidator.LengthAtMost(24)},
+				Optional:  true,
+				Sensitive: true,
+				Validators: []validator.String{
+					stringvalidator.LengthAtMost(24),
+					nonEmptyString(),
+				},
 				MarkdownDescription: "A label for the profile in NameSilo's UI. Optional, and " +
 					"informational: it does not appear in WHOIS output.",
 			},
@@ -181,6 +209,7 @@ func (r *contactResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Sensitive: true,
 				Validators: []validator.String{
 					stringvalidator.LengthAtMost(3),
+					nonEmptyString(),
 				},
 				MarkdownDescription: "The US Nexus category for a `.us` registrant, e.g. `C11`. " +
 					"Optional; needed only for `.us` domains.",
@@ -190,6 +219,7 @@ func (r *contactResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Sensitive: true,
 				Validators: []validator.String{
 					stringvalidator.LengthAtMost(2),
+					nonEmptyString(),
 				},
 				MarkdownDescription: "The US application purpose for a `.us` registrant, e.g. `P1`. " +
 					"Optional; needed only for `.us` domains.",
@@ -197,26 +227,31 @@ func (r *contactResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"ca_legal_form": schema.StringAttribute{
 				Optional:            true,
 				Sensitive:           true,
+				Validators:          []validator.String{nonEmptyString()},
 				MarkdownDescription: "The legal form CIRA requires for a `.ca` registrant. Optional.",
 			},
 			"ca_language": schema.StringAttribute{
 				Optional:            true,
 				Sensitive:           true,
+				Validators:          []validator.String{nonEmptyString()},
 				MarkdownDescription: "The preferred correspondence language for a `.ca` registrant. Optional.",
 			},
 			"ca_agreement_version": schema.StringAttribute{
 				Optional:            true,
 				Sensitive:           true,
+				Validators:          []validator.String{nonEmptyString()},
 				MarkdownDescription: "The CIRA registrant agreement version accepted for a `.ca` registrant. Optional.",
 			},
 			"ca_whois_display": schema.StringAttribute{
 				Optional:            true,
 				Sensitive:           true,
+				Validators:          []validator.String{nonEmptyString()},
 				MarkdownDescription: "The CIRA WHOIS display preference for a `.ca` registrant. Optional.",
 			},
 			"eu_citizenship_country": schema.StringAttribute{
 				Optional:            true,
 				Sensitive:           true,
+				Validators:          []validator.String{nonEmptyString()},
 				MarkdownDescription: "The citizenship country a `.eu` registrant qualifies under. Optional.",
 			},
 			"default_profile": schema.BoolAttribute{
@@ -371,17 +406,16 @@ func (r *contactResource) ImportState(ctx context.Context, req resource.ImportSt
 
 // ModifyPlan normalizes the configured shape to what Read writes: optional
 // fields whose planned value is "" become null, and country is uppercased.
-// Required fields need no normalization because the validators reject empty.
-// Unknown values are skipped, not guessed — the apply resolves them (§6.8).
+// Input that is already canonical is unchanged, and unknown values are skipped,
+// not guessed — the apply resolves them (§6.8).
 //
-// The normalization only preserves a quiet plan for the canonical shape,
-// because these attributes are Sensitive: Terraform and OpenTofu forbid a
-// provider from planning a known Sensitive value that differs from the
-// configuration (internal/plans/objchange/assertPlannedValueValid). A
-// lowercase country or an explicit "" therefore reaches the core as an invalid
-// plan rather than being folded to the API's shape. Satisfying the design's
-// uppercasing for arbitrary input would need a semantic-equality custom type,
-// not types.String; see the Task 11 report.
+// OpenTofu core forbids a provider from planning a value that differs from a
+// known configuration value (internal/plans/objchange/assertPlannedValueValid);
+// a non-null prior is the excepted case. These attributes also carry
+// validators, so non-canonical input is rejected at validate time before it
+// reaches the plan. The uppercasing stays because it is what makes an update
+// against existing state converge; on create there is nothing to normalize
+// against. This mirrors the spec's §6.8 and the Task 11 report.
 func (r *contactResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.Plan.Raw.IsNull() {
 		return
@@ -424,9 +458,10 @@ func (r *contactResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 
 // normalizeOptionalString maps a known empty planned value to null, the shape
 // Read writes, so a canonical plan does not diff against the null the API's
-// empty element produces. Unknown values are returned unchanged. Because the
-// optional attributes are Sensitive, core rejects the change at plan time for
-// input that is not already canonical (see ModifyPlan).
+// empty element produces. Unknown values are returned unchanged. The optional
+// attributes also carry nonEmptyString, so an explicit "" is rejected at
+// validate time; this branch is the update-path fallback that keeps the plan
+// quiet. See ModifyPlan for the core limitation on primitives.
 func normalizeOptionalString(value types.String) types.String {
 	if value.IsNull() || value.IsUnknown() {
 		return value
@@ -435,4 +470,37 @@ func normalizeOptionalString(value types.String) types.String {
 		return types.StringNull()
 	}
 	return value
+}
+
+// nonEmptyString rejects an explicitly configured empty string. An Optional
+// attribute expresses "unset" as null, which a configuration spells by omitting
+// the attribute; setting it to "" is a different value that would reach the API
+// as a value, or be dropped and leave a perpetual diff. Null and unknown values
+// pass, so omission is accepted. Shared by namesilo_contact's optional strings
+// and namesilo_domain_contacts' roles.
+func nonEmptyString() validator.String {
+	return nonEmptyStringValidator{}
+}
+
+type nonEmptyStringValidator struct{}
+
+func (nonEmptyStringValidator) Description(context.Context) string {
+	return "value must not be an empty string; omit the attribute instead"
+}
+
+func (v nonEmptyStringValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (nonEmptyStringValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	if req.ConfigValue.ValueString() == "" {
+		resp.Diagnostics.AddAttributeError(
+			req.Path,
+			"Invalid Attribute Value",
+			"An empty string is not a valid value. Omit the attribute instead of setting an empty string.",
+		)
+	}
 }

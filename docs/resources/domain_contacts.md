@@ -50,10 +50,10 @@ resource "namesilo_domain_contacts" "example" {
 
 ### Optional
 
-- `administrative` (String) The `contact_id` of the administrative profile. Optional; when it is omitted the role is left alone and the API's current value is stored as computed.
-- `billing` (String) The `contact_id` of the billing profile. Optional; when it is omitted the role is left alone and the API's current value is stored as computed.
-- `registrant` (String) The `contact_id` of the registrant profile. Optional; when it is omitted the role is left alone and the API's current value is stored as computed. The registrant is the role most likely to be restricted: changing it can trigger a registry contact-verification email and, for some TLDs, is rejected outright, with the API error surfaced unchanged.
-- `technical` (String) The `contact_id` of the technical profile. Optional; when it is omitted the role is left alone and the API's current value is stored as computed.
+- `administrative` (String) The `contact_id` of the administrative profile. Optional; when it is omitted the role is left alone and the API's current value is stored as computed. Omit it to stop managing the role; an empty string is rejected.
+- `billing` (String) The `contact_id` of the billing profile. Optional; when it is omitted the role is left alone and the API's current value is stored as computed. Omit it to stop managing the role; an empty string is rejected.
+- `registrant` (String) The `contact_id` of the registrant profile. Optional; when it is omitted the role is left alone and the API's current value is stored as computed. Omitting it is how to stop managing the role; do not set an empty string. The registrant is the role most likely to be restricted: changing it can trigger a registry contact-verification email and, for some TLDs, is rejected outright, with the API error surfaced unchanged.
+- `technical` (String) The `contact_id` of the technical profile. Optional; when it is omitted the role is left alone and the API's current value is stored as computed. Omit it to stop managing the role; an empty string is rejected.
 
 ### Read-Only
 

@@ -4,14 +4,14 @@ page_title: "namesilo_nameservers Resource - namesilo"
 subcategory: ""
 description: |-
   Manages a domain's registrar nameserver delegation — the NS records the registry publishes. NameSilo replaces the whole set in one call, so this resource is authoritative: the domain's delegation is exactly the nameservers set.
-  Two behaviours surprise operators. First, values are stored lowercased: a configuration written in another case is normalized at plan time, so it does not diff. Second, destroying this resource does not remove delegation — the API offers no way to do that. Destroy repoints the domain at NameSilo's default nameservers (ns1.dnsowl.com, ns2.dnsowl.com, ns3.dnsowl.com), which is an outage if the zone is hosted elsewhere. Remove this resource only when the domain is being retired or is about to use a different provider.
+  Two behaviours surprise operators. First, values are canonical lowercase DNS names: the API returns lowercase names and the provider stores them lowercased with any trailing dot stripped, so write nameserver values in lowercase without a trailing dot. A value in another case, or with a trailing dot, fails at plan time on create — OpenTofu rejects the provider's normalization — while an update against existing state converges. Second, destroying this resource does not remove delegation — the API offers no way to do that. Destroy repoints the domain at NameSilo's default nameservers (ns1.dnsowl.com, ns2.dnsowl.com, ns3.dnsowl.com), which is an outage if the zone is hosted elsewhere. Remove this resource only when the domain is being retired or is about to use a different provider.
 ---
 
 # namesilo_nameservers (Resource)
 
 Manages a domain's registrar nameserver delegation — the NS records the registry publishes. NameSilo replaces the whole set in one call, so this resource is authoritative: the domain's delegation is exactly the `nameservers` set.
 
-Two behaviours surprise operators. First, values are stored lowercased: a configuration written in another case is normalized at plan time, so it does not diff. Second, destroying this resource does not remove delegation — the API offers no way to do that. Destroy repoints the domain at NameSilo's default nameservers (`ns1.dnsowl.com`, `ns2.dnsowl.com`, `ns3.dnsowl.com`), which is an outage if the zone is hosted elsewhere. Remove this resource only when the domain is being retired or is about to use a different provider.
+Two behaviours surprise operators. First, values are canonical lowercase DNS names: the API returns lowercase names and the provider stores them lowercased with any trailing dot stripped, so write nameserver values in lowercase without a trailing dot. A value in another case, or with a trailing dot, fails at plan time on create — OpenTofu rejects the provider's normalization — while an update against existing state converges. Second, destroying this resource does not remove delegation — the API offers no way to do that. Destroy repoints the domain at NameSilo's default nameservers (`ns1.dnsowl.com`, `ns2.dnsowl.com`, `ns3.dnsowl.com`), which is an outage if the zone is hosted elsewhere. Remove this resource only when the domain is being retired or is about to use a different provider.
 
 ## Example Usage
 
@@ -36,7 +36,7 @@ output "delegation" {
 ### Required
 
 - `domain` (String) The domain whose delegation to manage, e.g. `example.com`. Changing it forces a replacement: the resource is pointed at a different domain rather than renamed. Also the import ID.
-- `nameservers` (Set of String) The complete delegation set. A set, not a list: order has no meaning for delegation, the API assigns positions itself, and NameSilo returns the set in an arbitrary order. Values are stored lowercased and with a trailing dot stripped, and are normalized at plan time so a differently-cased configuration does not diff. The API requires at least two and accepts at most thirteen nameservers. Destroying the resource repoints the domain at NameSilo's default nameservers rather than removing delegation.
+- `nameservers` (Set of String) The complete delegation set. A set, not a list: order has no meaning for delegation, the API assigns positions itself, and NameSilo returns the set in an arbitrary order. The API returns lowercase names and the provider stores them lowercased with any trailing dot stripped, so write values in lowercase without a trailing dot. A value in another case, or with a trailing dot, fails at plan time on create — OpenTofu rejects the provider's normalization — while an update against existing state converges. The API requires at least two and accepts at most thirteen nameservers. Destroying the resource repoints the domain at NameSilo's default nameservers rather than removing delegation.
 
 ### Read-Only
 

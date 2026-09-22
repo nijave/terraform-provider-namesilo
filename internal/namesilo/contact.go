@@ -185,11 +185,15 @@ type contactAddReply struct {
 }
 
 // AddContact creates a profile and returns the API's new contact_id. Every
-// field is sent, empty values included (§8.1).
+// field is sent, empty values included (§8.1). A success reply without a
+// <contact_id> element is an error rather than an empty id in state.
 func (c *Client) AddContact(ctx context.Context, contact Contact) (string, error) {
 	var reply contactAddReply
 	if err := c.call(ctx, "contactAdd", contact.contactParams(false), &reply); err != nil {
 		return "", err
+	}
+	if reply.Reply.ContactID == "" {
+		return "", fmt.Errorf("contactAdd: the reply has no <contact_id> element")
 	}
 	return reply.Reply.ContactID, nil
 }

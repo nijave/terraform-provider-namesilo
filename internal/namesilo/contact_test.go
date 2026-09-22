@@ -307,6 +307,24 @@ func TestContactAddUpdateDeleteRequests(t *testing.T) {
 			t.Errorf("id = %q, want %q", id, "c42")
 		}
 	})
+
+	t.Run("contactAdd without a contact_id element is an error", func(t *testing.T) {
+		// A success-shaped reply that omits <contact_id> must not yield an
+		// empty id in state; the error names the operation and the element.
+		srv := serveXML(t, contactSuccessReply)
+		c := NewClient(srv.URL, "test-key", "test")
+
+		id, err := c.AddContact(context.Background(), full)
+		if err == nil {
+			t.Fatalf("AddContact = %q, want an error for a reply without <contact_id>", id)
+		}
+		if !strings.Contains(err.Error(), "contactAdd") {
+			t.Errorf("error %q does not name the operation", err)
+		}
+		if !strings.Contains(err.Error(), "<contact_id>") {
+			t.Errorf("error %q does not name the element", err)
+		}
+	})
 }
 
 func TestContactList(t *testing.T) {
