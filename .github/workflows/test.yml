@@ -1,0 +1,212 @@
+# Runs on pull requests and on pushes to main. Scoping push to main avoids a
+# duplicate run when a branch in this repo also has an open PR.
+#
+# Actions are pinned to immutable commit SHAs, with the human-readable version
+# in a trailing comment. A moved major tag cannot change CI behavior; Dependabot
+# understands the `# vX` comment and updates both parts.
+name: Tests
+on:
+  pull_request:
+    paths-ignore:
+      - 'README.md'
+      - 'docs/superpowers/**'
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'docs/superpowers/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - run: go mod download
+      - run: go build -v ./...
+      - name: gofmt
+        run: |
+          test -z "$(gofmt -l .)" || (gofmt -l . && echo "run 'make fmt'" && exit 1)
+      - run: go vet ./...
+
+  unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      # The harness tests shell out to a CLI to drive the provider, so the
+      # binary must exist: TestMain points the harness at whichever terraform/
+      # tofu binary it finds. OpenTofu rather than Terraform, so no
+      # BUSL-licensed binary is used in CI.
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2
+        with:
+          tofu_version: '1.12.4'
+          tofu_wrapper: false
+      - run: go mod download
+      - name: go test
+        run: go test -v -cover ./internal/...
+
+  generate:
+    name: Generated Docs Are Current
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      # tools/gen-schema.sh shells out to `tofu` to export the provider schema
+      # (see that script for why tfplugindocs can't be pointed at OpenTofu
+      # directly). Pinned exactly because schema export output changes when the
+      # exporting CLI crosses a feature threshold, which is doc drift. OpenTofu
+      # rather than Terraform, so no BUSL-licensed binary is used in CI.
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2
+        with:
+          tofu_version: '1.12.4'
+          tofu_wrapper: false
+      - name: Generate
+        run: make docs
+      - name: Check for uncommitted changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Generated documentation is out of date. Run 'make docs' and commit the result." >&2
+            git status --short
+            exit 1
+          fi
+
+  acceptance:
+    name: Acceptance (OpenTofu ${{ matrix.tofu }})
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        # The support floor is OpenTofu 1.10, the oldest release line still
+        # receiving security support; 1.12 is the newest. Terraform is not
+        # tested: it is BUSL-licensed and is not the reference platform.
+        tofu:
+          - '1.10.*'
+          - '1.12.*'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2
+        with:
+          tofu_version: ${{ matrix.tofu }}
+          tofu_wrapper: false
+      - run: go mod download
+      # Resolve tofu's absolute path: terraform-plugin-testing requires an
+      # absolute TF_ACC_TERRAFORM_PATH on some versions, and the bare name on
+      # PATH is not guaranteed to satisfy it. This mirrors the Makefile's
+      # testacc-live target, which is known to work.
+      - name: Resolve tofu path
+        run: echo "TF_ACC_TERRAFORM_PATH=$(command -v tofu)" >> "$GITHUB_ENV"
+      - name: Acceptance tests
+        timeout-minutes: 20
+        env:
+          TF_ACC: '1'
+          # terraform-plugin-testing performs no version check against a binary
+          # already present at this path, so the harness drives OpenTofu
+          # directly and never downloads Terraform.
+          TF_ACC_TERRAFORM_PATH: ${{ env.TF_ACC_TERRAFORM_PATH }}
+          # Required, not optional. terraform-plugin-testing defaults its
+          # reattach host to registry.terraform.io while still registering the
+          # legacy "-" namespace as a reattach candidate, and OpenTofu's address
+          # parser rejects that pairing outright. Without this, EVERY acceptance
+          # test fails before it reaches the provider.
+          TF_ACC_PROVIDER_HOST: registry.opentofu.org
+        run: go test -v -cover -timeout 20m ./internal/provider/
+
+  # Optional live tests against the real Namesilo API. Secrets cannot gate a
+  # job-level `if` (their value is not available outside step expressions in a
+  # always-run job), so the job always runs and every step checks the env var
+  # mirrored from the secret instead. Without NAMESILO_API_KEY configured the
+  # job is a no-op that reports success, not a failure.
+  live:
+    name: Live Tests
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    env:
+      NAMESILO_API_KEY: ${{ secrets.NAMESILO_API_KEY }}
+      NAMESILO_TEST_DOMAIN: ${{ secrets.NAMESILO_TEST_DOMAIN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: env.NAMESILO_API_KEY != ''
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        if: env.NAMESILO_API_KEY != ''
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2
+        if: env.NAMESILO_API_KEY != ''
+        with:
+          tofu_version: '1.12.*'
+          tofu_wrapper: false
+      # Resolve tofu's absolute path for the same reason as in the acceptance
+      # job: the bare name on PATH is not guaranteed to satisfy
+      # terraform-plugin-testing.
+      - name: Resolve tofu path
+        if: env.NAMESILO_API_KEY != ''
+        run: echo "TF_ACC_TERRAFORM_PATH=$(command -v tofu)" >> "$GITHUB_ENV"
+      - name: Live tests
+        if: env.NAMESILO_API_KEY != ''
+        timeout-minutes: 65
+        env:
+          TF_ACC_TERRAFORM_PATH: ${{ env.TF_ACC_TERRAFORM_PATH }}
+          TF_ACC_PROVIDER_HOST: registry.opentofu.org
+        run: make testacc-live
+
+  license:
+    name: Dependency Licenses
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      # go-licenses is pinned as a tool dependency of the tools module
+      # (tools/go.mod), so Dependabot's gomod updates keep it current; a
+      # `go install ...@version` pin in a run step would be invisible to it.
+      # Build the binary from the tools module, then run it against the root
+      # module's packages from the repo root.
+      - name: Build go-licenses
+        run: (cd tools && go build -o "$RUNNER_TEMP/go-licenses" github.com/google/go-licenses)
+      # The project is GPL-3.0-or-later, so every dependency must be
+      # GPLv3-compatible. The forbidden set is what actually threatens that:
+      # BUSL-1.1 (Terraform CLI since 1.6) and the copyleft-incompatible
+      # licenses. Apache-2.0 is allowed because this is GPLv3, not GPLv2. If the
+      # license is ever downgraded, re-audit spec section 13 first.
+      - name: Check licenses
+        run: |
+          "$RUNNER_TEMP/go-licenses" check ./... \
+            --disallowed_types=forbidden,restricted,unknown \
+            --ignore=github.com/nijave/terraform-provider-namesilo
+      - name: Report licenses
+        if: always()
+        run: |
+          "$RUNNER_TEMP/go-licenses" report ./... --ignore=github.com/nijave/terraform-provider-namesilo || true
