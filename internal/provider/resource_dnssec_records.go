@@ -327,7 +327,7 @@ func (r *dnssecRecordsResource) ModifyPlan(ctx context.Context, req resource.Mod
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if plan.Records.IsNull() || !setWhollyKnown(plan.Records) {
+	if plan.Records.IsNull() || !recordsSetWhollyKnown(ctx, plan.Records) {
 		return
 	}
 
@@ -346,4 +346,30 @@ func (r *dnssecRecordsResource) ModifyPlan(ctx context.Context, req resource.Mod
 		return
 	}
 	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("records"), set)...)
+}
+
+// recordsSetWhollyKnown reports whether the planned records set is known down
+// to every attribute of every element. setWhollyKnown only inspects the
+// element values themselves, and a set of objects reports a known element even
+// when one of its attributes is unknown — the shape a reference to another
+// resource's computed attribute produces when both resources are created in one
+// plan. Normalizing such a plan would stamp a known empty digest over the
+// unknown value and the apply would fail its consistency check (§6.8), so the
+// set is normalized only when it is known all the way down.
+func recordsSetWhollyKnown(ctx context.Context, set types.Set) bool {
+	if !setWhollyKnown(set) {
+		return false
+	}
+	var models []dsRecordModel
+	diags := set.ElementsAs(ctx, &models, true)
+	if diags.HasError() {
+		return false
+	}
+	for _, model := range models {
+		if model.KeyTag.IsUnknown() || model.Algorithm.IsUnknown() ||
+			model.DigestType.IsUnknown() || model.Digest.IsUnknown() {
+			return false
+		}
+	}
+	return true
 }

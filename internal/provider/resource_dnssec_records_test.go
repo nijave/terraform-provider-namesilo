@@ -66,6 +66,34 @@ func dsRecordsHCL(records ...namesilo.DSRecord) string {
 	return "[" + strings.Join(parts, ", ") + "]"
 }
 
+// dnssecRecordsUnknownDigestConfig renders a nameservers resource and a
+// dnssec_records resource created in one plan, with the record's digest
+// referencing the nameservers resource's id. That id is unknown during the
+// first plan, so the planned records set holds a known element with an unknown
+// digest attribute. The domain is deadbeef: a name that is also valid
+// hexadecimal, so the id the reference resolves to satisfies the digest
+// validator and the configuration settles after the apply.
+func dnssecRecordsUnknownDigestConfig(endpoint string, keyTag, algorithm, digestType int64) string {
+	return namesiloProviderConfig(endpoint) + `
+resource "namesilo_nameservers" "test" {
+  domain      = "deadbeef"
+  nameservers = ["ns1.example.net", "ns2.example.net"]
+}
+
+resource "namesilo_dnssec_records" "test" {
+  domain  = "deadbeef"
+  records = [
+    {
+      key_tag     = ` + fmt.Sprintf("%d", keyTag) + `
+      algorithm   = ` + fmt.Sprintf("%d", algorithm) + `
+      digest_type = ` + fmt.Sprintf("%d", digestType) + `
+      digest      = namesilo_nameservers.test.id
+    },
+  ]
+}
+`
+}
+
 // expectDSRecords checks the applied state's set equals the given records.
 func expectDSRecords(records ...namesilo.DSRecord) statecheck.StateCheck {
 	checks := make([]knownvalue.Check, 0, len(records))
@@ -148,6 +176,45 @@ func TestAccDNSSecRecordsCreateAdopt(t *testing.T) {
 				}
 				if strings.Contains(last, "test-key") {
 					t.Errorf("the request log leaked the API key: %s", last)
+				}
+			},
+		}},
+	})
+}
+
+// TestAccDNSSecRecordsCreateWithUnknownDigest covers the ModifyPlan guard for
+// a partially-unknown planned element (§6.8). Both resources are created in one
+// plan, and digest references the nameservers resource's id, which is unknown
+// during the first plan. The planned records set is known and holds a known
+// element — but that element's digest attribute is unknown, a shape the
+// element-level IsUnknown check cannot see. ModifyPlan must leave the value
+// alone: normalizing it would stamp a known empty digest over the reference,
+// and the apply would publish a record with no digest instead of the real one.
+func TestAccDNSSecRecordsCreateWithUnknownDigest(t *testing.T) {
+	requireTofu(t)
+	fake := newFakeNamesilo()
+	defer fake.Close()
+	// Seed the delegation so the nameservers resource's refresh has state to
+	// read; the create still repoints it.
+	fake.addDomain("deadbeef").nameservers = []string{"ns1.dnsowl.com", "ns2.dnsowl.com", "ns3.dnsowl.com"}
+
+	resource.Test(t, resource.TestCase{
+		IsUnitTest:               true,
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: dnssecRecordsUnknownDigestConfig(fake.URL(), 1, 8, 2),
+			ConfigStateChecks: []statecheck.StateCheck{
+				expectDSRecords(namesilo.DSRecord{KeyTag: 1, Algorithm: 8, DigestType: 2, Digest: "deadbeef"}),
+			},
+			ConfigPlanChecks: expectEmptyAfterRefresh(),
+			PostApplyFunc: func() {
+				stored := fake.dsRecordsFor("deadbeef")
+				if len(stored) != 1 {
+					t.Fatalf("the fake holds %d DS records, want 1: %+v", len(stored), stored)
+				}
+				if stored[0].Digest != "deadbeef" {
+					t.Errorf("the applied record's digest is %q, want the referenced id \"deadbeef\" "+
+						"(an empty digest means ModifyPlan overwrote the unknown value)", stored[0].Digest)
 				}
 			},
 		}},
