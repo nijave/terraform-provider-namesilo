@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -93,12 +94,14 @@ func TestReplyCodeClassification(t *testing.T) {
 		{name: "253 succeeds for domainUnlock", operation: "domainUnlock", code: "253", detail: "already unlocked"},
 		{name: "255 succeeds for addPrivacy", operation: "addPrivacy", code: "255", detail: "already private"},
 		{name: "256 succeeds for removePrivacy", operation: "removePrivacy", code: "256", detail: "already not private"},
+		{name: "210 succeeds for dnsSecDeleteRecord", operation: "dnsSecDeleteRecord", code: "210", detail: "There are no active records specified for deletion"},
 		{name: "250 from probe is an error", operation: "probe", code: "250", detail: "already set to AutoRenew", wantErr: true},
 		{name: "251 from probe is an error", operation: "probe", code: "251", detail: "already set not to AutoRenew", wantErr: true},
 		{name: "252 from probe is an error", operation: "probe", code: "252", detail: "already locked", wantErr: true},
 		{name: "253 from probe is an error", operation: "probe", code: "253", detail: "already unlocked", wantErr: true},
 		{name: "255 from probe is an error", operation: "probe", code: "255", detail: "already private", wantErr: true},
 		{name: "256 from probe is an error", operation: "probe", code: "256", detail: "already not private", wantErr: true},
+		{name: "210 from probe is an error", operation: "probe", code: "210", detail: "There are no active records specified for deletion", wantErr: true},
 		{name: "110 invalid API key", operation: "probe", code: "110", detail: "Invalid API key", wantErr: true},
 		{name: "200 domain not active", operation: "probe", code: "200", detail: "Domain is not active", wantErr: true},
 		{name: "400 still processing", operation: "probe", code: "400", detail: "Existing API request is still processing", wantErr: true},
@@ -153,6 +156,93 @@ func TestReplyMissingCode(t *testing.T) {
 	if !strings.Contains(err.Error(), "probe") {
 		t.Errorf("error %q does not name the operation", err)
 	}
+}
+
+// TestCallRetriesThrottled503 pins the retry contract: the API throttles
+// bursts with HTTP 503, so a 503 is retried with backoff up to throttleRetries
+// times. Every other status is immediate, and a cancelled context stops before
+// the first attempt.
+func TestCallRetriesThrottled503(t *testing.T) {
+	t.Run("503,503,200 succeeds with three attempts", func(t *testing.T) {
+		var attempts int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if atomic.AddInt32(&attempts, 1) <= 2 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			writeReply(w, "300", "success")
+		}))
+		defer srv.Close()
+		c := NewClient(srv.URL, "test-key", "test")
+
+		if err := c.call(context.Background(), "probe", nil, nil); err != nil {
+			t.Fatalf("call: %v, want success after the 503 retries", err)
+		}
+		if got := atomic.LoadInt32(&attempts); got != 3 {
+			t.Errorf("handler saw %d attempts, want 3 (two 503s then a 200)", got)
+		}
+	})
+
+	t.Run("503,503,503,503 fails after the retries are exhausted", func(t *testing.T) {
+		var attempts int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&attempts, 1)
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}))
+		defer srv.Close()
+		c := NewClient(srv.URL, "test-key", "test")
+
+		err := c.call(context.Background(), "probe", nil, nil)
+		if err == nil {
+			t.Fatal("call: nil error, want an error after the retries are exhausted")
+		}
+		if !strings.Contains(err.Error(), "503") {
+			t.Errorf("error %q does not name the HTTP status", err)
+		}
+		if got := atomic.LoadInt32(&attempts); got != throttleRetries+1 {
+			t.Errorf("handler saw %d attempts, want %d (the first try plus %d retries)",
+				got, throttleRetries+1, throttleRetries)
+		}
+	})
+
+	t.Run("500 fails immediately with one attempt", func(t *testing.T) {
+		var attempts int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&attempts, 1)
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+		c := NewClient(srv.URL, "test-key", "test")
+
+		err := c.call(context.Background(), "probe", nil, nil)
+		if err == nil {
+			t.Fatal("call: nil error, want an immediate error for a 500")
+		}
+		if got := atomic.LoadInt32(&attempts); got != 1 {
+			t.Errorf("handler saw %d attempts, want 1 (only a 503 is retried)", got)
+		}
+	})
+
+	t.Run("cancelled context does not retry", func(t *testing.T) {
+		var attempts int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&attempts, 1)
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}))
+		defer srv.Close()
+		c := NewClient(srv.URL, "test-key", "test")
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		err := c.call(ctx, "probe", nil, nil)
+		if err == nil {
+			t.Fatal("call: nil error, want a failure for a cancelled context")
+		}
+		if got := atomic.LoadInt32(&attempts); got > 1 {
+			t.Errorf("handler saw %d attempts, want at most 1 with a cancelled context", got)
+		}
+	})
 }
 
 func TestHTTPErrors(t *testing.T) {

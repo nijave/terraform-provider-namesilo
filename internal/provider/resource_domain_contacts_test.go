@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
@@ -16,6 +17,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 
 	"github.com/nijave/terraform-provider-namesilo/internal/namesilo"
+	"github.com/nijave/terraform-provider-namesilo/internal/provider"
 )
 
 // domainContactsConfig renders one namesilo_domain_contacts block. roles maps
@@ -461,5 +463,108 @@ func TestAccDomainContactsImport(t *testing.T) {
 				ConfigPlanChecks: expectEmptyAfterRefresh(),
 			},
 		},
+	})
+}
+
+// shrinkContactsPropagation shortens the resource's propagation wait for a
+// hermetic test and returns a function that restores the production values, so
+// a test never leaks a tiny window into another test or the live suite.
+func shrinkContactsPropagation(interval, timeout time.Duration) func() {
+	oldInterval := provider.DomainContactsPropagationPollInterval
+	oldTimeout := provider.DomainContactsPropagationTimeout
+	provider.DomainContactsPropagationPollInterval = interval
+	provider.DomainContactsPropagationTimeout = timeout
+	return func() {
+		provider.DomainContactsPropagationPollInterval = oldInterval
+		provider.DomainContactsPropagationTimeout = oldTimeout
+	}
+}
+
+// TestAccDomainContactsCreateTwoPollPropagation exercises the polling loop
+// itself: the fake models a propagation window two reads wide, so Create must
+// poll past both stale reads before it can confirm the write. The apply
+// completes with the configured state and the following refresh is quiet,
+// which fails if the provider trusts the first post-write read.
+func TestAccDomainContactsCreateTwoPollPropagation(t *testing.T) {
+	requireTofu(t)
+	defer shrinkContactsPropagation(20*time.Millisecond, time.Second)()
+
+	fake := newFakeNamesilo()
+	defer fake.Close()
+	seedDomainContacts(fake,
+		namesilo.ContactRoles{Registrant: "9999", Administrative: "1002", Technical: "1003", Billing: "1004"},
+		"9999", "1001", "1002", "1003", "1004")
+	fake.setStaleRoleReadsCount(2)
+
+	config := domainContactsConfig(fake.URL(), map[string]string{"registrant": "1001"})
+
+	resource.Test(t, resource.TestCase{
+		IsUnitTest:               true,
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: config,
+			ConfigStateChecks: []statecheck.StateCheck{
+				expectDomainContactsString("id", "example.com"),
+				expectDomainContactsString("registrant", "1001"),
+				expectDomainContactsString("administrative", "1002"),
+				expectDomainContactsString("technical", "1003"),
+				expectDomainContactsString("billing", "1004"),
+			},
+			ConfigPlanChecks: expectEmptyAfterRefresh(),
+			PostApplyFunc: func() {
+				if got := fake.count("getDomainInfo"); got < 3 {
+					t.Errorf("getDomainInfo called %d times, want at least 3 (two stale reads plus the confirming read)", got)
+				}
+				if got := fake.count("contactDomainAssociate"); got != 1 {
+					t.Errorf("contactDomainAssociate called %d times, want 1", got)
+				}
+			},
+		}},
+	})
+}
+
+// TestAccDomainContactsCreatePropagationTimeout covers the timeout path: the
+// fake never releases the pre-write roles, so the wait exhausts its (shrunk)
+// window, warns, and lets Create fall back to the plan for the managed role and
+// one getDomainInfo for the unmanaged ones. The apply must complete with the
+// configured state rather than fail, and the only plan that sees a phantom
+// change is the post-apply refresh the still-stale API forces.
+func TestAccDomainContactsCreatePropagationTimeout(t *testing.T) {
+	requireTofu(t)
+	defer shrinkContactsPropagation(5*time.Millisecond, 40*time.Millisecond)()
+
+	fake := newFakeNamesilo()
+	defer fake.Close()
+	seedDomainContacts(fake,
+		namesilo.ContactRoles{Registrant: "9999", Administrative: "1002", Technical: "1003", Billing: "1004"},
+		"9999", "1001", "1002", "1003", "1004")
+	// A window that never closes, so the wait always times out.
+	fake.setStaleRoleReadsCount(-1)
+
+	config := domainContactsConfig(fake.URL(), map[string]string{"registrant": "1001"})
+
+	resource.Test(t, resource.TestCase{
+		IsUnitTest:               true,
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: config,
+			// The stale API makes the post-apply refresh plan the registrant
+			// back to the old value, so the refresh plan is not empty. The
+			// warning does not fail the apply; the next refresh, once the
+			// association lands, confirms the write.
+			ExpectNonEmptyPlan: true,
+			ConfigStateChecks: []statecheck.StateCheck{
+				expectDomainContactsString("id", "example.com"),
+				expectDomainContactsString("registrant", "1001"),
+				expectDomainContactsString("administrative", "1002"),
+				expectDomainContactsString("technical", "1003"),
+				expectDomainContactsString("billing", "1004"),
+			},
+			PostApplyFunc: func() {
+				if got := fake.count("contactDomainAssociate"); got != 1 {
+					t.Errorf("contactDomainAssociate called %d times, want 1", got)
+				}
+			},
+		}},
 	})
 }

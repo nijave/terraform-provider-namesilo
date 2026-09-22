@@ -96,6 +96,9 @@ func (r *contactResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"the optional string attributes are omitted rather than set to an empty string. " +
 			"Non-canonical values are rejected at validate time, both when creating and when " +
 			"updating.\n\n" +
+			"`nickname` can only be set when a profile is created. The API ignores it on update, so " +
+			"changing the planned nickname of an existing profile is rejected at plan time; replace " +
+			"the profile to change it.\n\n" +
 			"Destroying the resource deletes the profile. The API refuses to delete a profile still " +
 			"associated with a domain, and the account's default profile cannot be deleted; the error " +
 			"is surfaced unchanged, and the fix is to reassign the domain's contacts first — which is " +
@@ -200,7 +203,9 @@ func (r *contactResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					nonEmptyString(),
 				},
 				MarkdownDescription: "A label for the profile in NameSilo's UI. Optional, and " +
-					"informational: it does not appear in WHOIS output.",
+					"informational: it does not appear in WHOIS output. It can only be set when the " +
+					"profile is created: the API ignores it on update, so changing it on an existing " +
+					"profile is rejected at plan time and needs a replacement.",
 			},
 			"us_nexus_category": schema.StringAttribute{
 				Optional:  true,
@@ -425,6 +430,32 @@ func (r *contactResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 		return
 	}
 
+	// nickname is create-only. The API honors nn on contactAdd but ignores it
+	// on contactUpdate, so an update that changes it would report success and
+	// then refresh back to the old value, leaving a perpetual diff. A non-null
+	// prior state means this is an update (a create has null state and a
+	// destroy has a null plan, both exempt). The comparison treats null and ""
+	// as the same, matching the normalized state form.
+	if !req.State.Raw.IsNull() {
+		var state contactResourceModel
+		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		if nicknameChanged(plan.Nickname, state.Nickname) {
+			resp.Diagnostics.AddAttributeError(
+				path.Root("nickname"),
+				"Nickname cannot be changed after creation",
+				"The NameSilo API ignores the nickname on contactUpdate: it can only be set when a "+
+					"profile is created. To change it, replace the profile instead of updating it, for "+
+					"example with `tofu apply -replace=namesilo_contact.<name>`.",
+			)
+		}
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
+
 	// Only the normalized attributes are written back, so the framework's
 	// planning for the computed id and default_profile is left alone.
 	optionals := []struct {
@@ -452,6 +483,18 @@ func (r *contactResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("country"),
 			types.StringValue(strings.ToUpper(plan.Country.ValueString())))...)
 	}
+}
+
+// nicknameChanged reports whether a planned nickname differs from the prior
+// one. Unknown values are left for the apply to resolve and never count as a
+// change. A null value and an empty string compare equal, because "" is the
+// shape a configured empty optional normalizes to and the API reports as
+// empty; the validator rejects an explicit "" anyway.
+func nicknameChanged(planned, prior types.String) bool {
+	if planned.IsUnknown() || prior.IsUnknown() {
+		return false
+	}
+	return planned.ValueString() != prior.ValueString()
 }
 
 // normalizeOptionalString maps a known empty planned value to null, the shape

@@ -78,9 +78,10 @@ func (c *Client) ListDSRecords(ctx context.Context, domain string) ([]DSRecord, 
 }
 
 // dsRecordParams builds the parameters the DNSSEC write operations share.
-// The request carries the digest unchanged, and the field names are the
-// API's request spelling: camelCase keyTag and digestType and the abbreviated
-// alg, never the response's full-word algorithm (§12.1).
+// The request carries the digest as the caller set it, and the field names are
+// the API's request spelling: camelCase keyTag and digestType and the
+// abbreviated alg, never the response's full-word algorithm (§12.1). Callers
+// that need the API's stored digest case adjust it before calling.
 func dsRecordParams(domain string, record DSRecord) map[string]string {
 	return map[string]string{
 		"domain":     domain,
@@ -91,12 +92,23 @@ func dsRecordParams(domain string, record DSRecord) map[string]string {
 	}
 }
 
-// AddDSRecord adds one DS record to the domain's DNSSEC delegation.
+// AddDSRecord adds one DS record to the domain's DNSSEC delegation. The digest
+// is sent as given: dnsSecAddRecord accepts any case, and the API stores it
+// uppercased.
 func (c *Client) AddDSRecord(ctx context.Context, domain string, record DSRecord) error {
 	return c.call(ctx, "dnsSecAddRecord", dsRecordParams(domain, record), nil)
 }
 
 // DeleteDSRecord removes one DS record from the domain's DNSSEC delegation.
+//
+// The request sends the digest uppercased. The API matches the digest
+// case-sensitively against the stored form and stores digests uppercased
+// (dnsSecAddRecord accepts any case; dnsSecListRecords echoes uppercase), so a
+// lowercase delete is answered with code 210 "There are no active records
+// specified for deletion". The provider keeps the digest lowercase in state for
+// diff equality (NormalizeDSRecord), so the stored-case form is rebuilt here on
+// the wire only.
 func (c *Client) DeleteDSRecord(ctx context.Context, domain string, record DSRecord) error {
+	record.Digest = strings.ToUpper(record.Digest)
 	return c.call(ctx, "dnsSecDeleteRecord", dsRecordParams(domain, record), nil)
 }

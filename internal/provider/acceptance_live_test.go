@@ -170,15 +170,16 @@ resource "namesilo_privacy" "test" {
 `, domain, domain)
 }
 
-// liveContactConfig renders one namesilo_contact block whose nickname varies
-// per step: the update's one-field change.
-func liveContactConfig(nickname string) string {
+// liveContactConfig renders one namesilo_contact block whose city varies per
+// step: the update's one-field change. The nickname is fixed per profile
+// because the API ignores it on update and the provider rejects changing it.
+func liveContactConfig(nickname, city string) string {
 	return liveProviderConfig() + fmt.Sprintf(`
 resource "namesilo_contact" "test" {
   first_name = "Terraform"
   last_name  = "Acceptance"
   address    = "1 Test Way"
-  city       = "Testville"
+  city       = %q
   state      = "TX"
   zip        = "73301"
   country    = "US"
@@ -187,7 +188,7 @@ resource "namesilo_contact" "test" {
   company    = "Terraform Provider Acceptance"
   nickname   = %q
 }
-`, nickname)
+`, city, nickname)
 }
 
 // liveDomainLockConfig renders one namesilo_domain_lock block.
@@ -387,7 +388,10 @@ func captureDomainContactsRoles(dst *liveContactRoles) resource.TestCheckFunc {
 
 // checkTechnicalReassigned asserts the technical role moved to the throwaway
 // profile and the other three roles hold the values captured at the baseline.
-func checkTechnicalReassigned(before liveContactRoles) resource.TestCheckFunc {
+// It takes a pointer because the baseline is filled in by step 1's Check: the
+// Steps literal is built before that Check runs, so passing the struct by value
+// would freeze a zero-value copy.
+func checkTechnicalReassigned(before *liveContactRoles) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
 		scratch, err := liveResourceAttr(s, "namesilo_contact.scratch", "id")
 		if err != nil {
@@ -799,7 +803,7 @@ func TestAccLiveContactImport(t *testing.T) {
 	liveOptIn(t, envOptInContact,
 		"this test creates and deletes contact profiles in the live account")
 
-	config := liveContactConfig("tf-live-contact-import")
+	config := liveContactConfig("tf-live-contact-import", "Testville")
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccLivePreCheck(t) },
@@ -1083,7 +1087,7 @@ func TestAccLiveContact(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: liveContactConfig("tf-live-contact"),
+				Config: liveContactConfig("tf-live-contact", "Testville"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue("namesilo_contact.test",
 						tfjsonpath.New("first_name"), knownvalue.StringExact("Terraform")),
@@ -1097,10 +1101,12 @@ func TestAccLiveContact(t *testing.T) {
 				ConfigPlanChecks: expectEmptyAfterRefresh(),
 			},
 			{
-				Config: liveContactConfig("tf-live-contact-2"),
+				// The nickname is immutable after create, so the update moves
+				// the mutable city instead.
+				Config: liveContactConfig("tf-live-contact", "Testville-2"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue("namesilo_contact.test",
-						tfjsonpath.New("nickname"), knownvalue.StringExact("tf-live-contact-2")),
+						tfjsonpath.New("city"), knownvalue.StringExact("Testville-2")),
 				},
 				ConfigPlanChecks: resource.ConfigPlanChecks{
 					PreApply: []plancheck.PlanCheck{
@@ -1150,7 +1156,7 @@ func TestAccLiveDomainContacts(t *testing.T) {
 			{
 				Config:           liveDomainContactsReassignConfig(domain),
 				ConfigPlanChecks: expectEmptyAfterRefresh(),
-				Check:            checkTechnicalReassigned(baseline),
+				Check:            checkTechnicalReassigned(&baseline),
 			},
 			{
 				// Reassign the technical role away from the throwaway, so the

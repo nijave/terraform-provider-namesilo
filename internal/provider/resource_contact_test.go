@@ -318,6 +318,58 @@ func TestAccContactUpdate(t *testing.T) {
 	})
 }
 
+// TestAccContactNicknameCreateOnly covers §6.4's create-only nickname rule:
+// the API honors nn on contactAdd but ignores it on contactUpdate, so
+// ModifyPlan rejects a changed nickname on an existing profile with the
+// diagnostic instead of applying an update that would silently revert. An
+// unchanged nickname with a changed city still updates.
+func TestAccContactNicknameCreateOnly(t *testing.T) {
+	requireTofu(t)
+	fake := newFakeNamesilo()
+	defer fake.Close()
+
+	values := fullContact()
+	created := contactConfig(fake.URL(), values.attrs(true))
+
+	changedNickname := fullContact()
+	changedNickname.Nickname = "ada-2"
+	nicknameConfig := contactConfig(fake.URL(), changedNickname.attrs(true))
+
+	changedCity := fullContact()
+	changedCity.City = "Manchester"
+	cityConfig := contactConfig(fake.URL(), changedCity.attrs(true))
+
+	resource.Test(t, resource.TestCase{
+		IsUnitTest:               true,
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config:            created,
+				ConfigStateChecks: []statecheck.StateCheck{expectContactString("nickname", "ada")},
+				ConfigPlanChecks:  expectEmptyAfterRefresh(),
+			},
+			{
+				Config:      nicknameConfig,
+				ExpectError: regexp.MustCompile("Nickname cannot be changed after creation"),
+			},
+			{
+				Config: cityConfig,
+				ConfigStateChecks: []statecheck.StateCheck{
+					expectContactString("nickname", "ada"),
+					expectContactString("city", "Manchester"),
+				},
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("namesilo_contact.test",
+							plancheck.ResourceActionUpdate),
+					},
+					PostApplyPostRefresh: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+			},
+		},
+	})
+}
+
 // TestAccContactEmptyOptionalRoundTrip covers §12.2 "contact empty optional"
 // and §4 invariant 8: a config with only the required fields sends every
 // optional as empty, the fake returns empty elements, state holds null, and the

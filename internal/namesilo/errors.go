@@ -14,13 +14,27 @@ var successCodes = map[string]bool{
 // alreadyInState maps an operation to the reply code that means the requested
 // state already holds. The code is success for that operation only: a 250 from
 // any other operation is an error, because the classification is per operation.
+//
+// dnsSecDeleteRecord's 210 is a little different from the toggle codes above. A
+// DS record that was added moments ago and has not activated yet cannot be
+// deleted: the API answers 210 "There are no active records specified for
+// deletion" -- and the delete takes effect anyway (a live probe added two
+// records back-to-back and deleted one immediately: 210, but the record never
+// appeared in dnsSecListRecords again, and deleting the other once active was a
+// clean 300). The reconcile deletes records moments after creating them, so
+// this code is routine, not an error. If a record ever lingers despite the 210,
+// the next refresh re-surfaces it and a later apply deletes it once active, so
+// tolerating the code is self-healing. Delete parameters always come from state
+// parsed out of the API's own list, so a genuine parameter-mismatch 210 (the
+// other meaning of the code) is unreachable in practice.
 var alreadyInState = map[string]string{
-	"addAutoRenewal":    "250",
-	"removeAutoRenewal": "251",
-	"domainLock":        "252",
-	"domainUnlock":      "253",
-	"addPrivacy":        "255",
-	"removePrivacy":     "256",
+	"addAutoRenewal":     "250",
+	"removeAutoRenewal":  "251",
+	"domainLock":         "252",
+	"domainUnlock":       "253",
+	"addPrivacy":         "255",
+	"removePrivacy":      "256",
+	"dnsSecDeleteRecord": "210",
 }
 
 // APIError is a NameSilo reply whose code is not success. It carries the

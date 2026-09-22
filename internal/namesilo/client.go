@@ -54,6 +54,14 @@ type replyHeader struct {
 	Detail string `xml:"detail"`
 }
 
+// throttleRetries is how many times a 503 is retried, and throttleBaseDelay is
+// the first wait. The delays double each attempt (1s, 2s, 4s), so the added
+// latency is bounded at 7 seconds.
+const (
+	throttleRetries   = 3
+	throttleBaseDelay = time.Second
+)
+
 // call issues one operation and classifies its reply. params are sent
 // verbatim (empty values included), and out, when non-nil, receives the whole
 // XML body so an operation can decode its own fields.
@@ -77,13 +85,9 @@ func (c *Client) call(ctx context.Context, operation string, params map[string]s
 	req.URL.RawQuery = q.Encode()
 	req.Header.Set("User-Agent", "terraform-provider-namesilo/"+c.version)
 
-	resp, err := c.http.Do(req)
+	resp, err := c.doThrottled(ctx, operation, req)
 	if err != nil {
-		// A transport failure's cause (timeout, DNS, TLS) is useful, but
-		// http.Client.Do returns a *url.Error whose text embeds the full
-		// request URL, and the URL's query carries the API key. Only the
-		// inner cause is formatted, never the *url.Error itself.
-		return fmt.Errorf("%s: request failed: %s", operation, redactedCause(err))
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -112,6 +116,49 @@ func (c *Client) call(ctx context.Context, operation string, params map[string]s
 		return fmt.Errorf("%s: decoding the XML reply: %w", operation, err)
 	}
 	return nil
+}
+
+// doThrottled issues req, retrying an HTTP 503 response with a bounded
+// backoff. The API answers request bursts with 503 and its own guidance is to
+// retry after a wait, so a 503 is retried up to throttleRetries times with
+// throttleBaseDelay, 2x, and 4x waits — about 7 seconds of added latency at
+// most. Every other status is returned to the caller immediately, and every
+// XML-level error code is classified by call, so only a 503 waits.
+//
+// A cancelled or expired context stops the wait and is reported as a request
+// failure, the same shape as a transport failure. The inner cause is formatted
+// rather than the *url.Error, because that error's text embeds the request URL
+// whose query carries the API key.
+func (c *Client) doThrottled(ctx context.Context, operation string, req *http.Request) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := c.http.Do(req)
+		if err != nil {
+			// A transport failure's cause (timeout, DNS, TLS) is useful, but
+			// http.Client.Do returns a *url.Error whose text embeds the full
+			// request URL, and the URL's query carries the API key. Only the
+			// inner cause is formatted, never the *url.Error itself.
+			return nil, fmt.Errorf("%s: request failed: %s", operation, redactedCause(err))
+		}
+		if resp.StatusCode != http.StatusServiceUnavailable || attempt >= throttleRetries {
+			return resp, nil
+		}
+		resp.Body.Close()
+		if err := sleepContext(ctx, throttleBaseDelay<<attempt); err != nil {
+			return nil, fmt.Errorf("%s: request failed: %s", operation, redactedCause(err))
+		}
+	}
+}
+
+// sleepContext waits for d or until ctx is done, whichever comes first.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // redactedCause returns the inner cause of a request error without the URL.

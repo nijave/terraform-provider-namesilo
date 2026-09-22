@@ -4,6 +4,7 @@ package namesilo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -180,6 +181,81 @@ func TestListDSRecordsDropsEmptyElement(t *testing.T) {
 			t.Errorf("records[0] = %+v, want %+v", records[0], want[0])
 		}
 	})
+}
+
+// TestDeleteDSRecordUppercasesDigest pins the delete wire case. The API stores
+// digests uppercased and matches a delete request case-sensitively, so a
+// lowercase digest (the provider's state form) must be sent uppercased or the
+// API answers code 210. The caller's record is not mutated: state stays
+// lowercase for diff equality.
+func TestDeleteDSRecordUppercasesDigest(t *testing.T) {
+	const lower = "a94f2c81e0d5b7a3f1c6d8e2b4a6c8d0e2f4a6c8d0e2f4a6c8d0e2f4a6c8d0e2"
+	record := DSRecord{KeyTag: 12345, Algorithm: 8, DigestType: 2, Digest: lower}
+
+	requests := make(chan capturedRequest, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- capturedRequest{path: r.URL.Path, query: r.URL.Query()}
+		writeReply(w, "300", "success")
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "test-key", "test")
+
+	if err := c.DeleteDSRecord(context.Background(), "example.com", record); err != nil {
+		t.Fatalf("DeleteDSRecord: %v", err)
+	}
+
+	got := <-requests
+	if got.path != "/dnsSecDeleteRecord" {
+		t.Errorf("path = %q, want %q", got.path, "/dnsSecDeleteRecord")
+	}
+	if v := got.query.Get("digest"); v != strings.ToUpper(lower) {
+		t.Errorf("delete digest = %q, want the uppercased stored form %q", v, strings.ToUpper(lower))
+	}
+	if record.Digest != lower {
+		t.Errorf("the record's digest became %q; the state form must stay %q", record.Digest, lower)
+	}
+}
+
+// TestDeleteDSRecordToleratesPending210 pins the pending-record tolerance. A DS
+// record that has just been added and has not activated yet cannot be deleted:
+// the API answers code 210 "There are no active records specified for deletion"
+// and the delete takes effect anyway, so the code is treated as success. The
+// reconcile deletes records moments after adding them, so this is routine.
+func TestDeleteDSRecordToleratesPending210(t *testing.T) {
+	const body = `<namesilo><reply><code>210</code><detail>There are no active records specified for deletion</detail></reply></namesilo>`
+	srv := serveXML(t, body)
+	c := NewClient(srv.URL, "test-key", "test")
+
+	record := DSRecord{KeyTag: 12345, Algorithm: 8, DigestType: 2, Digest: "A94F2C81E0D5B7A3F1C6D8E2B4A6C8D0E2F4A6C8D0E2F4A6C8D0E2F4A6C8D0E2"}
+	if err := c.DeleteDSRecord(context.Background(), "example.com", record); err != nil {
+		t.Fatalf("DeleteDSRecord with a pending-record 210: %v, want success", err)
+	}
+}
+
+// TestPending210IsPerOperation pins that the 210 tolerance belongs to
+// dnsSecDeleteRecord alone: the same code from another operation is still an
+// error, because the classification is per operation (210 also means a general
+// error, such as an unknown parameter).
+func TestPending210IsPerOperation(t *testing.T) {
+	const body = `<namesilo><reply><code>210</code><detail>General error</detail></reply></namesilo>`
+	srv := serveXML(t, body)
+	c := NewClient(srv.URL, "test-key", "test")
+
+	record := DSRecord{KeyTag: 12345, Algorithm: 8, DigestType: 2, Digest: "A94F2C81E0D5B7A3F1C6D8E2B4A6C8D0E2F4A6C8D0E2F4A6C8D0E2F4A6C8D0E2"}
+	err := c.AddDSRecord(context.Background(), "example.com", record)
+	if err == nil {
+		t.Fatal("AddDSRecord with code 210: nil error, want *APIError")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %v (%T), want *APIError", err, err)
+	}
+	if apiErr.Code != "210" {
+		t.Errorf("Code = %q, want %q", apiErr.Code, "210")
+	}
+	if apiErr.Operation != "dnsSecAddRecord" {
+		t.Errorf("Operation = %q, want %q", apiErr.Operation, "dnsSecAddRecord")
+	}
 }
 
 func TestListDSRecordsMalformedInt(t *testing.T) {

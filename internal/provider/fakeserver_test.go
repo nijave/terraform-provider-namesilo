@@ -49,13 +49,17 @@ type fakeNamesilo struct {
 	// incomplete-list warning (§7).
 	ignorePaging bool
 
-	// staleRoleReads makes getDomainInfo answer the first read after each
-	// contactDomainAssociate with the pre-write roles, modelling the real
-	// API's propagation window. pendingStaleRoles holds that one-shot reply,
-	// keyed by domain. The domain-contacts consistency test turns it on; the
-	// other tests leave it off so propagation is immediate.
-	staleRoleReads    bool
+	// staleRoleReads models getDomainInfo lagging a contactDomainAssociate
+	// write. It is how many reads after each associate still answer with the
+	// pre-write roles: 1 is the one-read window the live probe measured, 2 is a
+	// window wide enough to exercise the provider's polling loop, and a
+	// negative value is a window that never closes, for the timeout path. 0
+	// disables the model so propagation is immediate. pendingStaleRoles holds
+	// the one-shot (or few-shot) reply keyed by domain, and staleReadsLeft
+	// counts down the remaining reads for each domain.
+	staleRoleReads    int
 	pendingStaleRoles map[string]namesilo.ContactRoles
+	staleReadsLeft    map[string]int
 
 	// nextContactID is the contactAdd ID sequence: the first assigned ID is
 	// 1001.
@@ -97,6 +101,7 @@ func newFakeNamesilo() *fakeNamesilo {
 		failures:          make(map[string]fakeFailure),
 		contacts:          make(map[string]namesilo.Contact),
 		pendingStaleRoles: make(map[string]namesilo.ContactRoles),
+		staleReadsLeft:    make(map[string]int),
 		nextContactID:     1000,
 	}
 	f.server = httptest.NewServer(http.HandlerFunc(f.handle))
@@ -137,14 +142,26 @@ func (f *fakeNamesilo) setIgnorePaging(ignore bool) {
 	f.ignorePaging = ignore
 }
 
-// setStaleRoleReads turns on the propagation-window model: the first
-// getDomainInfo after each contactDomainAssociate answers with the roles as
-// they were before the write, the way the real API lags the association. Later
-// reads answer with the new roles, so a drift self-heals on the next refresh.
+// setStaleRoleReads turns the propagation-window model on or off with the
+// one-read window: the first getDomainInfo after each contactDomainAssociate
+// answers with the roles as they were before the write, the way the real API
+// lags the association. Later reads answer with the new roles, so a drift
+// self-heals on the next refresh.
 func (f *fakeNamesilo) setStaleRoleReads(stale bool) {
+	f.setStaleRoleReadsCount(0)
+	if stale {
+		f.setStaleRoleReadsCount(1)
+	}
+}
+
+// setStaleRoleReadsCount models a propagation window that takes reads stale.
+// n > 0 is that many stale reads after each associate; n < 0 is a window that
+// never closes, so the pre-write roles are answered forever (the timeout
+// path); 0 disables the model.
+func (f *fakeNamesilo) setStaleRoleReadsCount(n int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.staleRoleReads = stale
+	f.staleRoleReads = n
 }
 
 // setForward rewrites one domain's forwarding fields out of band, the way a
@@ -170,13 +187,25 @@ func (f *fakeNamesilo) setNameservers(name string, nameservers []string) {
 }
 
 // setDSRecords mutates one domain's DS records out of band, the way a change
-// in NameSilo's web UI would. The drift tests call it from PreConfig.
+// in NameSilo's web UI would. Digests are stored uppercased to match the API's
+// stored form; the client sends delete requests uppercased because of it. The
+// drift tests call it from PreConfig.
 func (f *fakeNamesilo) setDSRecords(name string, records []namesilo.DSRecord) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if d, ok := f.domains[name]; ok {
-		d.dsRecords = append([]namesilo.DSRecord(nil), records...)
+		d.dsRecords = storedDSRecords(records)
 	}
+}
+
+// storedDSRecords copies records the way the API stores them: digests
+// uppercased.
+func storedDSRecords(records []namesilo.DSRecord) []namesilo.DSRecord {
+	out := append([]namesilo.DSRecord(nil), records...)
+	for i := range out {
+		out[i].Digest = strings.ToUpper(out[i].Digest)
+	}
+	return out
 }
 
 // setPrivate flips one domain's WHOIS privacy out of band, the way a change in
@@ -218,8 +247,10 @@ func (f *fakeNamesilo) setAutoRenew(name string, autoRenew bool) {
 	}
 }
 
-// dsRecordsFor returns a copy of one domain's DS records, so a CheckDestroy
-// can assert the destroy left none behind without racing a handler.
+// dsRecordsFor returns a copy of one domain's DS records with digests in the
+// provider's canonical lowercase form, so a CheckDestroy can assert the destroy
+// left none behind without racing a handler. The store holds the API's
+// uppercased form; this helper reports the state form tests compare against.
 func (f *fakeNamesilo) dsRecordsFor(name string) []namesilo.DSRecord {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -227,7 +258,11 @@ func (f *fakeNamesilo) dsRecordsFor(name string) []namesilo.DSRecord {
 	if !ok {
 		return nil
 	}
-	return append([]namesilo.DSRecord(nil), d.dsRecords...)
+	out := append([]namesilo.DSRecord(nil), d.dsRecords...)
+	for i := range out {
+		out[i].Digest = strings.ToLower(out[i].Digest)
+	}
+	return out
 }
 
 // setRoles reassigns one domain's contact associations out of band, the way a
@@ -420,7 +455,16 @@ func (f *fakeNamesilo) handleGetDomainInfo(w http.ResponseWriter, operation, dom
 		d = cloneFakeDomain(d)
 		if stale, pending := f.pendingStaleRoles[domain]; pending {
 			d.roles = stale
-			delete(f.pendingStaleRoles, domain)
+			// A finite window closes after its last stale read; a negative
+			// count never decrements, so the pre-write roles are answered for
+			// every read (the timeout path).
+			if f.staleRoleReads >= 0 {
+				f.staleReadsLeft[domain]--
+				if f.staleReadsLeft[domain] <= 0 {
+					delete(f.pendingStaleRoles, domain)
+					delete(f.staleReadsLeft, domain)
+				}
+			}
 		}
 	}
 	f.mu.Unlock()
@@ -565,7 +609,9 @@ func (f *fakeNamesilo) handleDNSSecListRecords(w http.ResponseWriter, operation,
 		b.WriteString("<keyTag>" + strconv.FormatInt(record.KeyTag, 10) + "</keyTag>")
 		b.WriteString("<algorithm>" + strconv.FormatInt(record.Algorithm, 10) + "</algorithm>")
 		b.WriteString("<digestType>" + strconv.FormatInt(record.DigestType, 10) + "</digestType>")
-		b.WriteString("<digest>" + xmlEscape(record.Digest) + "</digest>")
+		// The API echoes digests uppercased regardless of the case the add
+		// carried, so the fake does too.
+		b.WriteString("<digest>" + xmlEscape(strings.ToUpper(record.Digest)) + "</digest>")
 		b.WriteString("</ds_record>")
 	}
 
@@ -597,8 +643,8 @@ func dsRecordFromQuery(query map[string][]string) (namesilo.DSRecord, error) {
 }
 
 // handleDNSSecAddRecord appends one DS record to the domain and replies 300.
-// The record is stored as sent: the digest's case is the provider layer's
-// concern, and the fake is deliberately not helpful about it.
+// The digest is stored uppercased, exactly as the real API stores it however
+// the add cased it. Delete then matches case-sensitively against this form.
 func (f *fakeNamesilo) handleDNSSecAddRecord(w http.ResponseWriter, operation string, query map[string][]string) {
 	domain := firstValue(query, "domain")
 	record, err := dsRecordFromQuery(query)
@@ -606,6 +652,7 @@ func (f *fakeNamesilo) handleDNSSecAddRecord(w http.ResponseWriter, operation st
 		writeReply(w, operation, "400", "malformed DS record: "+err.Error(), "")
 		return
 	}
+	record.Digest = strings.ToUpper(record.Digest)
 
 	f.mu.Lock()
 	d, ok := f.domains[domain]
@@ -621,10 +668,13 @@ func (f *fakeNamesilo) handleDNSSecAddRecord(w http.ResponseWriter, operation st
 	writeReply(w, operation, "300", "success", "")
 }
 
-// handleDNSSecDeleteRecord removes the matching DS record, comparing tuples
-// canonically so a record stored with a differently-cased digest still matches.
-// Deleting a record that is not present is a no-op, which is what makes the
-// provider's list-then-delete reconcile idempotent (§4 invariant 3).
+// handleDNSSecDeleteRecord removes the matching DS record and replies 300. The
+// digest is compared case-sensitively against the stored (uppercased) form,
+// mirroring the real API: a lowercase delete request is answered with code 210
+// "There are no active records specified for deletion", which is what the
+// client's uppercasing exists to avoid. Only a request whose tuples match a
+// record exactly removes it; the provider lists before deleting, so it never
+// sends a delete for a record that is already gone.
 func (f *fakeNamesilo) handleDNSSecDeleteRecord(w http.ResponseWriter, operation string, query map[string][]string) {
 	domain := firstValue(query, "domain")
 	record, err := dsRecordFromQuery(query)
@@ -632,23 +682,34 @@ func (f *fakeNamesilo) handleDNSSecDeleteRecord(w http.ResponseWriter, operation
 		writeReply(w, operation, "400", "malformed DS record: "+err.Error(), "")
 		return
 	}
-	want := namesilo.NormalizeDSRecord(record).Key()
 
 	f.mu.Lock()
 	d, ok := f.domains[domain]
+	found := false
 	if ok {
 		kept := make([]namesilo.DSRecord, 0, len(d.dsRecords))
 		for _, existing := range d.dsRecords {
-			if namesilo.NormalizeDSRecord(existing).Key() != want {
-				kept = append(kept, existing)
+			if existing.KeyTag == record.KeyTag &&
+				existing.Algorithm == record.Algorithm &&
+				existing.DigestType == record.DigestType &&
+				strings.ToUpper(existing.Digest) == record.Digest {
+				found = true
+				continue
 			}
+			kept = append(kept, existing)
 		}
-		d.dsRecords = kept
+		if found {
+			d.dsRecords = kept
+		}
 	}
 	f.mu.Unlock()
 
 	if !ok {
 		writeReply(w, operation, "200", "Domain is not active, or does not belong to this user", "")
+		return
+	}
+	if !found {
+		writeReply(w, operation, "210", "There are no active records specified for deletion", "")
 		return
 	}
 	writeReply(w, operation, "300", "success", "")
@@ -908,9 +969,10 @@ func (f *fakeNamesilo) handleContactAdd(w http.ResponseWriter, operation string,
 	writeReply(w, operation, "300", "success", "<contact_id>"+id+"</contact_id>")
 }
 
-// handleContactUpdate replaces the stored profile's fields, preserving the
-// account-level default_profile, which contactUpdate cannot set. An unknown
-// contact_id answers the API's generic error code 210.
+// handleContactUpdate replaces the stored profile's fields, preserving the two
+// the API does not change through this operation: the account-level
+// default_profile and the nickname, which is create-only and ignored on
+// update. An unknown contact_id answers the API's generic error code 210.
 func (f *fakeNamesilo) handleContactUpdate(w http.ResponseWriter, operation string, query map[string][]string) {
 	id := firstValue(query, "contact_id")
 	contact := contactFromQuery(query)
@@ -919,6 +981,7 @@ func (f *fakeNamesilo) handleContactUpdate(w http.ResponseWriter, operation stri
 	existing, ok := f.contacts[id]
 	if ok {
 		contact.ID = id
+		contact.Nickname = existing.Nickname
 		contact.DefaultProfile = existing.DefaultProfile
 		f.contacts[id] = contact
 	}
@@ -958,8 +1021,9 @@ func (f *fakeNamesilo) handleContactDomainAssociate(w http.ResponseWriter, opera
 	f.mu.Lock()
 	d, ok := f.domains[domain]
 	if ok {
-		if f.staleRoleReads {
+		if f.staleRoleReads != 0 {
 			f.pendingStaleRoles[domain] = d.roles
+			f.staleReadsLeft[domain] = f.staleRoleReads
 		}
 		if v := firstValue(query, "registrant"); v != "" {
 			d.roles.Registrant = v

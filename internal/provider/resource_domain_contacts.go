@@ -5,7 +5,10 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -15,6 +18,19 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"github.com/nijave/terraform-provider-namesilo/internal/namesilo"
+)
+
+// DomainContactsPropagationPollInterval and DomainContactsPropagationTimeout
+// bound the wait for a contactDomainAssociate write to appear in
+// getDomainInfo. contactDomainAssociate succeeds before its change is visible
+// in a read: the real API propagates over several seconds (measured: a read two
+// seconds after the write still reported the old role, and it landed within
+// tens of seconds), so Create and Update poll rather than trust the first
+// post-write read. They are variables, not constants, so the hermetic tests can
+// shrink them; production keeps a 2-second interval and a 60-second bound.
+var (
+	DomainContactsPropagationPollInterval = 2 * time.Second
+	DomainContactsPropagationTimeout      = 60 * time.Second
 )
 
 var (
@@ -39,12 +55,17 @@ var (
 // contactDomainAssociate succeeds before its change is visible in
 // getDomainInfo: the association propagates over several seconds, so a read
 // taken immediately after the write can still report the old role. Create and
-// Update therefore never trust a post-write getDomainInfo for the roles they
-// just set — they take those from the plan, which already carries what was
-// written. Read remains the authority and refreshes all four roles; drift that
-// this leaves in state (an out-of-band change between refreshes) self-heals on
-// the next refresh rather than being reported as an inconsistent result after
-// apply.
+// Update send the write and then wait for it: they poll getDomainInfo until
+// every role they just wrote matches, bounded by
+// DomainContactsPropagationTimeout. When the wait confirms propagation they
+// fill state from that final read, so the immediate post-apply refresh sees no
+// phantom change. If the window elapses first they fall back to the plan's
+// values for the managed roles (and one getDomainInfo for any unknowns) and
+// emit a warning, because the association is still propagating and the next
+// refresh will confirm it. Read remains the authority and refreshes all four
+// roles; drift that this leaves in state (an out-of-band change between
+// refreshes) self-heals on the next refresh rather than being reported as an
+// inconsistent result after apply.
 type domainContactsResource struct {
 	client *namesilo.Client
 }
@@ -171,18 +192,17 @@ func (r *domainContactsResource) Configure(_ context.Context, req resource.Confi
 	r.client = client
 }
 
-// Create sends the roles that are present in configuration in one
-// contactDomainAssociate call. The managed roles take their planned
-// (configuration) values into the response state; the omitted roles are
-// Computed and unknown in the plan, so they are filled from one getDomainInfo
-// call before state is returned: OpenTofu requires every value to be known
-// after apply, so leaving them unknown for the framework's refresh to resolve
-// is rejected.
+// Create sends the roles present in configuration in one
+// contactDomainAssociate call and then waits for the write to propagate. When
+// the wait confirms propagation, all four roles come from the final
+// getDomainInfo (they are current and truthful then); when it times out, the
+// managed roles keep their planned values and the omitted roles, which are
+// Computed and unknown in a Create plan, are filled from one getDomainInfo call
+// so every value is known after apply. A warning names any role still lagging,
+// but a warning does not fail the apply.
 //
-// The managed roles come from the plan rather than from that getDomainInfo
-// call because the association write propagates over several seconds (see the
-// resource comment): re-reading immediately can return the old role and make
-// the provider produce a result that disagrees with the plan.
+// When configuration manages no roles, nothing is sent and nothing is waited
+// for: the omitted roles are simply filled from one getDomainInfo call.
 func (r *domainContactsResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan domainContactsResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -195,15 +215,15 @@ func (r *domainContactsResource) Create(ctx context.Context, req resource.Create
 		return
 	}
 
-	if roles := configuredRoles(config, plan); roles != (namesilo.ContactRoles{}) {
-		if err := r.client.AssociateContacts(ctx, plan.Domain.ValueString(), roles); err != nil {
-			addAPIError(&resp.Diagnostics, "namesilo_domain_contacts", err)
-			return
-		}
-	}
-
 	plan.ID = plan.Domain
-	if err := r.fillUnmanagedRoles(ctx, &config, &plan); err != nil {
+	info, confirmed, err := r.applyAssociatedRoles(ctx, &resp.Diagnostics, plan.Domain.ValueString(), configuredRoles(config, plan))
+	if err != nil {
+		addAPIError(&resp.Diagnostics, "namesilo_domain_contacts", err)
+		return
+	}
+	if confirmed {
+		applyRoles(&plan, info.Contacts)
+	} else if err := r.fillUnmanagedRoles(ctx, &config, &plan); err != nil {
 		addAPIError(&resp.Diagnostics, "namesilo_domain_contacts", err)
 		return
 	}
@@ -230,29 +250,25 @@ func (r *domainContactsResource) Read(ctx context.Context, req resource.ReadRequ
 
 // refreshRoles fills all four role attributes from getDomainInfo's contact_ids.
 // It is Read's refresh, and Read is the authority for out-of-band changes.
-// Create and Update do not call it for the roles they just wrote: the write's
-// propagation is not immediate (see the resource comment). Null and unknown
-// input values are overwritten, so every role in the caller's model becomes the
-// API's current value.
+// Create and Update fill from the getDomainInfo that confirmed their write.
+// Null and unknown input values are overwritten, so every role in the caller's
+// model becomes the API's current value.
 func (r *domainContactsResource) refreshRoles(ctx context.Context, model *domainContactsResourceModel) error {
 	info, err := r.client.GetDomainInfo(ctx, model.Domain.ValueString())
 	if err != nil {
 		return err
 	}
-	model.Registrant = nullIfEmpty(info.Contacts.Registrant)
-	model.Administrative = nullIfEmpty(info.Contacts.Administrative)
-	model.Technical = nullIfEmpty(info.Contacts.Technical)
-	model.Billing = nullIfEmpty(info.Contacts.Billing)
+	applyRoles(model, info.Contacts)
 	return nil
 }
 
 // fillUnmanagedRoles fills only the roles the configuration leaves unmanaged
 // (null in config, and therefore unknown in a Create plan) from one
 // getDomainInfo call, leaving the managed roles at the plan's configured
-// values. It makes no call when every role is configured. Create calls it after
-// the associate write; Update does not, because Update keeps the plan's values
-// for all four roles and lets the next Read pick up anything that changed out
-// of band.
+// values. It makes no call when every role is configured. Create calls it when
+// its propagation wait did not confirm (including the no-roles-sent path);
+// Update does not, because Update keeps the plan's values for all four roles
+// and lets the next Read pick up anything that changed out of band.
 func (r *domainContactsResource) fillUnmanagedRoles(ctx context.Context, config, plan *domainContactsResourceModel) error {
 	if !config.Registrant.IsNull() && !config.Administrative.IsNull() &&
 		!config.Technical.IsNull() && !config.Billing.IsNull() {
@@ -282,11 +298,11 @@ func (r *domainContactsResource) fillUnmanagedRoles(ctx context.Context, config,
 // role leaves the API's association untouched, which is the only thing the API
 // supports. A change to domain plans a replacement, so Update never sees one.
 //
-// It does not call getDomainInfo after the write. The plan already carries the
-// managed roles from configuration and the unmanaged roles from prior state,
-// so all four values are known; keeping them avoids the stale read the write's
-// propagation window would produce. The next Read is the authority and picks
-// up any out-of-band change then.
+// Like Create it waits for the write to propagate and, when the wait confirms,
+// fills all four roles from the final getDomainInfo. On timeout it keeps the
+// plan's values: the managed roles from configuration and the unmanaged roles
+// from prior state, so all four are known. The next Read is the authority and
+// picks up any out-of-band change then.
 func (r *domainContactsResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var plan domainContactsResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -299,15 +315,111 @@ func (r *domainContactsResource) Update(ctx context.Context, req resource.Update
 		return
 	}
 
-	if roles := configuredRoles(config, plan); roles != (namesilo.ContactRoles{}) {
-		if err := r.client.AssociateContacts(ctx, plan.Domain.ValueString(), roles); err != nil {
-			addAPIError(&resp.Diagnostics, "namesilo_domain_contacts", err)
-			return
+	plan.ID = plan.Domain
+	info, confirmed, err := r.applyAssociatedRoles(ctx, &resp.Diagnostics, plan.Domain.ValueString(), configuredRoles(config, plan))
+	if err != nil {
+		addAPIError(&resp.Diagnostics, "namesilo_domain_contacts", err)
+		return
+	}
+	if confirmed {
+		applyRoles(&plan, info.Contacts)
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// applyAssociatedRoles sends roles in one contactDomainAssociate call, waits
+// for the write to appear in getDomainInfo, and reports how it settled. It
+// returns the final getDomainInfo and true when the wait confirmed propagation;
+// on timeout it returns false, the getDomainInfo from the last poll (whose
+// managed roles may still be stale), and adds a warning naming the roles that
+// are still lagging. A zero roles value sends nothing, waits for nothing, and
+// returns false with no warning, so Create's unmanaged-configuration path does
+// not block.
+func (r *domainContactsResource) applyAssociatedRoles(ctx context.Context, diags *diag.Diagnostics, domain string, roles namesilo.ContactRoles) (namesilo.DomainInfo, bool, error) {
+	if roles == (namesilo.ContactRoles{}) {
+		return namesilo.DomainInfo{}, false, nil
+	}
+	if err := r.client.AssociateContacts(ctx, domain, roles); err != nil {
+		return namesilo.DomainInfo{}, false, err
+	}
+	info, lagging, err := r.waitForContactsPropagation(ctx, domain, roles)
+	if err != nil {
+		return namesilo.DomainInfo{}, false, err
+	}
+	if len(lagging) == 0 {
+		return info, true, nil
+	}
+	diags.AddWarning(
+		"Contact association is still propagating",
+		fmt.Sprintf("The roles %s for %s have not appeared in the API's domain information yet. "+
+			"contactDomainAssociate succeeds before its change is visible in a read, so the "+
+			"association is still propagating; the next refresh will confirm it. State keeps the "+
+			"values that were written until then.",
+			strings.Join(lagging, ", "), domain),
+	)
+	return info, false, nil
+}
+
+// waitForContactsPropagation polls getDomainInfo until every role named in want
+// (its non-empty fields) has the value that was just written, or
+// DomainContactsPropagationTimeout elapses. It returns the final getDomainInfo
+// and the names of the roles still lagging; the slice is empty when propagation
+// was confirmed. Context cancellation between polls is returned as an error, so
+// a cancelled apply stops promptly instead of waiting out the window.
+//
+// The window is the resource's documented propagation window: the live API
+// measured several seconds, so the default 2-second interval and 60-second
+// bound leave room for tens of seconds of lag without blocking forever.
+func (r *domainContactsResource) waitForContactsPropagation(ctx context.Context, domain string, want namesilo.ContactRoles) (namesilo.DomainInfo, []string, error) {
+	deadline := time.Now().Add(DomainContactsPropagationTimeout)
+	for {
+		info, err := r.client.GetDomainInfo(ctx, domain)
+		if err != nil {
+			return namesilo.DomainInfo{}, nil, err
+		}
+		lagging := laggingRoles(info.Contacts, want)
+		if len(lagging) == 0 || !time.Now().Before(deadline) {
+			return info, lagging, nil
+		}
+		timer := time.NewTimer(DomainContactsPropagationPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return namesilo.DomainInfo{}, nil, ctx.Err()
+		case <-timer.C:
 		}
 	}
+}
 
-	plan.ID = plan.Domain
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+// laggingRoles names the roles in want (its non-empty fields) whose value in
+// have differs. The names are the resource's attribute names, so a warning can
+// name them without translation.
+func laggingRoles(have, want namesilo.ContactRoles) []string {
+	var lagging []string
+	if want.Registrant != "" && have.Registrant != want.Registrant {
+		lagging = append(lagging, "registrant")
+	}
+	if want.Administrative != "" && have.Administrative != want.Administrative {
+		lagging = append(lagging, "administrative")
+	}
+	if want.Technical != "" && have.Technical != want.Technical {
+		lagging = append(lagging, "technical")
+	}
+	if want.Billing != "" && have.Billing != want.Billing {
+		lagging = append(lagging, "billing")
+	}
+	return lagging
+}
+
+// applyRoles overwrites all four roles in model with the API's current values,
+// mapping the API's empty strings to null. It is the mapping Refresh uses;
+// Create and Update call it with the getDomainInfo that confirmed their write,
+// so all four roles are current and truthful.
+func applyRoles(model *domainContactsResourceModel, roles namesilo.ContactRoles) {
+	model.Registrant = nullIfEmpty(roles.Registrant)
+	model.Administrative = nullIfEmpty(roles.Administrative)
+	model.Technical = nullIfEmpty(roles.Technical)
+	model.Billing = nullIfEmpty(roles.Billing)
 }
 
 // Delete is a no-op (§6.5, §4 invariant 10). The API has no disassociate
