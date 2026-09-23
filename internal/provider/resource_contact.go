@@ -5,7 +5,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -27,12 +26,6 @@ var (
 	_ resource.ResourceWithModifyPlan  = (*contactResource)(nil)
 )
 
-// iso3166Alpha2Pattern matches an uppercase ISO 3166-1 alpha-2 country code:
-// exactly two uppercase ASCII letters. Lowercase is rejected at validate time
-// rather than normalized, because OpenTofu core forbids the provider from
-// changing a known configured value at plan time on create (see ModifyPlan).
-var iso3166Alpha2Pattern = regexp.MustCompile(`^[A-Z]{2}$`)
-
 // contactResource manages one account-level contact profile. A profile is
 // identified by the API's contact_id and is not owned by a domain: a domain
 // references profiles by ID in four roles, so profiles and their associations
@@ -46,33 +39,14 @@ func NewContactResource() resource.Resource {
 	return &contactResource{}
 }
 
-// contactResourceModel is namesilo_contact's state model. Every field that
-// describes the contact person is a types.String mapped through nullIfEmpty;
+// contactResourceModel is namesilo_contact's state model. It embeds the shared
+// contactFields (the contact-person strings mapped through nullIfEmpty);
 // default_profile is the account-level computed flag and id is the API's
 // contact_id.
 type contactResourceModel struct {
-	FirstName            types.String `tfsdk:"first_name"`
-	LastName             types.String `tfsdk:"last_name"`
-	Address              types.String `tfsdk:"address"`
-	Address2             types.String `tfsdk:"address2"`
-	City                 types.String `tfsdk:"city"`
-	State                types.String `tfsdk:"state"`
-	Zip                  types.String `tfsdk:"zip"`
-	Country              types.String `tfsdk:"country"`
-	Email                types.String `tfsdk:"email"`
-	Phone                types.String `tfsdk:"phone"`
-	Fax                  types.String `tfsdk:"fax"`
-	Company              types.String `tfsdk:"company"`
-	Nickname             types.String `tfsdk:"nickname"`
-	UsNexusCategory      types.String `tfsdk:"us_nexus_category"`
-	UsApplicationPurpose types.String `tfsdk:"us_application_purpose"`
-	CaLegalForm          types.String `tfsdk:"ca_legal_form"`
-	CaLanguage           types.String `tfsdk:"ca_language"`
-	CaAgreementVersion   types.String `tfsdk:"ca_agreement_version"`
-	CaWhoisDisplay       types.String `tfsdk:"ca_whois_display"`
-	EuCitizenshipCountry types.String `tfsdk:"eu_citizenship_country"`
-	DefaultProfile       types.Bool   `tfsdk:"default_profile"`
-	ID                   types.String `tfsdk:"id"`
+	contactFields
+	DefaultProfile types.Bool   `tfsdk:"default_profile"`
+	ID             types.String `tfsdk:"id"`
 }
 
 func (r *contactResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -407,18 +381,18 @@ func (r *contactResource) ImportState(ctx context.Context, req resource.ImportSt
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
 
-// ModifyPlan normalizes the configured shape to what Read writes: optional
-// fields whose planned value is "" become null, and country is uppercased.
-// Input that is already canonical is unchanged, and unknown values are skipped,
-// not guessed — the apply resolves them (§6.8).
+// ModifyPlan rejects a nickname change on an existing profile (the API honors
+// the nickname only on create; see below) and normalizes the configured shape to
+// what Read writes: optional fields whose planned value is "" become null, and
+// country is uppercased. Input that is already canonical is unchanged, and
+// unknown values are skipped, not guessed — the apply resolves them (§6.8).
 //
-// OpenTofu core forbids a provider from planning a value that differs from a
-// known configuration value (internal/plans/objchange/assertPlannedValueValid);
-// a non-null prior is the excepted case. These attributes also carry
-// validators, so non-canonical input is rejected at validate time before it
-// reaches the plan. The uppercasing stays because it is what makes an update
-// against existing state converge; on create there is nothing to normalize
-// against. This mirrors the spec's §6.8 and the Task 11 report.
+// The normalization is inert defense-in-depth kept for spec fidelity to
+// §6.4/§6.8, not a correction path. Every attribute it touches carries a
+// validator, so a non-canonical value is rejected at validate time, on create
+// and update alike, before a plan is built: country by iso3166Alpha2Pattern and
+// each optional string by nonEmptyString. The normalization remains so that any
+// value that does reach the plan still converges to the shape Read writes.
 func (r *contactResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.Plan.Raw.IsNull() {
 		return
@@ -499,10 +473,10 @@ func nicknameChanged(planned, prior types.String) bool {
 
 // normalizeOptionalString maps a known empty planned value to null, the shape
 // Read writes, so a canonical plan does not diff against the null the API's
-// empty element produces. Unknown values are returned unchanged. The optional
-// attributes also carry nonEmptyString, so an explicit "" is rejected at
-// validate time; this branch is the update-path fallback that keeps the plan
-// quiet. See ModifyPlan for the core limitation on primitives.
+// empty element produces. Unknown values are returned unchanged. It is inert
+// defense-in-depth: the optional attributes carry nonEmptyString, so an explicit
+// "" is rejected at validate time on create and update alike and never reaches
+// the plan. Kept for spec fidelity (§6.4/§6.8); see ModifyPlan.
 func normalizeOptionalString(value types.String) types.String {
 	if value.IsNull() || value.IsUnknown() {
 		return value
@@ -511,37 +485,4 @@ func normalizeOptionalString(value types.String) types.String {
 		return types.StringNull()
 	}
 	return value
-}
-
-// nonEmptyString rejects an explicitly configured empty string. An Optional
-// attribute expresses "unset" as null, which a configuration spells by omitting
-// the attribute; setting it to "" is a different value that would reach the API
-// as a value, or be dropped and leave a perpetual diff. Null and unknown values
-// pass, so omission is accepted. Shared by namesilo_contact's optional strings
-// and namesilo_domain_contacts' roles.
-func nonEmptyString() validator.String {
-	return nonEmptyStringValidator{}
-}
-
-type nonEmptyStringValidator struct{}
-
-func (nonEmptyStringValidator) Description(context.Context) string {
-	return "value must not be an empty string; omit the attribute instead"
-}
-
-func (v nonEmptyStringValidator) MarkdownDescription(ctx context.Context) string {
-	return v.Description(ctx)
-}
-
-func (nonEmptyStringValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
-	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
-		return
-	}
-	if req.ConfigValue.ValueString() == "" {
-		resp.Diagnostics.AddAttributeError(
-			req.Path,
-			"Invalid Attribute Value",
-			"An empty string is not a valid value. Omit the attribute instead of setting an empty string.",
-		)
-	}
 }

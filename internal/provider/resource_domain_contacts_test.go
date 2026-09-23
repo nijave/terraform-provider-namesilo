@@ -4,6 +4,7 @@ package provider_test
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -145,6 +146,47 @@ func TestAccDomainContactsCreateStaleRead(t *testing.T) {
 			},
 			{
 				Config:           config,
+				ConfigPlanChecks: expectEmptyAfterRefresh(),
+			},
+		},
+	})
+}
+
+// TestAccDomainContactsValidationRejectsEmptyRole drives ValidateResourceConfig
+// through real OpenTofu: a role set to "" is rejected at validate time with the
+// omit-the-attribute message, while the canonical form (the role omitted, or a
+// real contact_id) applies.
+func TestAccDomainContactsValidationRejectsEmptyRole(t *testing.T) {
+	requireTofu(t)
+	fake := newFakeNamesilo()
+	defer fake.Close()
+	seedDomainContacts(fake,
+		namesilo.ContactRoles{Registrant: "1001", Administrative: "1002", Technical: "1003", Billing: "1004"},
+		"1001", "1002", "1003", "1004")
+
+	canonical := domainContactsConfig(fake.URL(), map[string]string{"registrant": "1001"})
+	emptyRole := domainContactsConfig(fake.URL(), map[string]string{"registrant": ""})
+
+	resource.Test(t, resource.TestCase{
+		IsUnitTest:               true,
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config:            canonical,
+				ConfigStateChecks: []statecheck.StateCheck{expectDomainContactsString("registrant", "1001")},
+				ConfigPlanChecks:  expectEmptyAfterRefresh(),
+			},
+			{
+				// Match a short fragment: OpenTofu wraps the diagnostic detail
+				// at the terminal width, so a longer pattern can be split by a
+				// newline.
+				Config:      emptyRole,
+				ExpectError: regexp.MustCompile("An empty string is not a valid value"),
+			},
+			{
+				// End on a valid config so the harness's post-test destroy,
+				// which runs against the last configuration, can succeed.
+				Config:           canonical,
 				ConfigPlanChecks: expectEmptyAfterRefresh(),
 			},
 		},

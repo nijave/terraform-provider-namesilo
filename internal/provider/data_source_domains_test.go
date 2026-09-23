@@ -208,6 +208,87 @@ func TestAccDomainsDataSourcePagingGuard(t *testing.T) {
 	})
 }
 
+// TestProviderDefaultPageSize covers the Configure contract for an absent
+// page_size: the provider schema has no schema-level default, so Configure
+// resolves the missing value to the documented 100. It drives the protocol 6
+// server the way OpenTofu core does — ConfigureProvider with page_size null,
+// then a namesilo_domains read against the fake — and asserts the client asked
+// for pageSize=100.
+func TestProviderDefaultPageSize(t *testing.T) {
+	fake := newFakeNamesilo()
+	defer fake.Close()
+	seedFakeDomains(fake, 3)
+
+	server, err := providerserver.NewProtocol6WithError(provider.New("test")())()
+	if err != nil {
+		t.Fatalf("creating the protocol 6 server: %v", err)
+	}
+
+	ctx := context.Background()
+	if _, err := server.GetProviderSchema(ctx, &tfprotov6.GetProviderSchemaRequest{}); err != nil {
+		t.Fatalf("GetProviderSchema returned an error: %v", err)
+	}
+
+	providerType := tftypes.Object{
+		AttributeTypes: map[string]tftypes.Type{
+			"api_key":   tftypes.String,
+			"endpoint":  tftypes.String,
+			"page_size": tftypes.Number,
+		},
+	}
+	providerValue := tftypes.NewValue(providerType, map[string]tftypes.Value{
+		"api_key":   tftypes.NewValue(tftypes.String, "test-key"),
+		"endpoint":  tftypes.NewValue(tftypes.String, fake.URL()),
+		"page_size": tftypes.NewValue(tftypes.Number, nil),
+	})
+	providerConfig, err := tfprotov6.NewDynamicValue(providerType, providerValue)
+	if err != nil {
+		t.Fatalf("encoding the provider configuration: %v", err)
+	}
+	configureResp, err := server.ConfigureProvider(ctx, &tfprotov6.ConfigureProviderRequest{
+		TerraformVersion: "test",
+		Config:           &providerConfig,
+	})
+	if err != nil {
+		t.Fatalf("ConfigureProvider returned an error: %v", err)
+	}
+	for _, diag := range configureResp.Diagnostics {
+		if diag.Severity == tfprotov6.DiagnosticSeverityError {
+			t.Fatalf("ConfigureProvider with an absent page_size: %s: %s", diag.Summary, diag.Detail)
+		}
+	}
+
+	configValue := tftypes.NewValue(domainsDataSourceType, map[string]tftypes.Value{
+		"domains": tftypes.NewValue(tftypes.Set{ElementType: domainSummaryType}, nil),
+		"total":   tftypes.NewValue(tftypes.Number, nil),
+		"id":      tftypes.NewValue(tftypes.String, nil),
+	})
+	config, err := tfprotov6.NewDynamicValue(domainsDataSourceType, configValue)
+	if err != nil {
+		t.Fatalf("encoding the data source configuration: %v", err)
+	}
+	readResp, err := server.ReadDataSource(ctx, &tfprotov6.ReadDataSourceRequest{
+		TypeName: "namesilo_domains",
+		Config:   &config,
+	})
+	if err != nil {
+		t.Fatalf("ReadDataSource returned an error: %v", err)
+	}
+	for _, diag := range readResp.Diagnostics {
+		if diag.Severity == tfprotov6.DiagnosticSeverityError {
+			t.Fatalf("ReadDataSource: %s: %s", diag.Summary, diag.Detail)
+		}
+	}
+
+	if got := fake.count("listDomains"); got != 1 {
+		t.Errorf("listDomains called %d times, want 1 (all domains fit in the default page)", got)
+	}
+	last := fake.lastRequest("listDomains")
+	if !strings.Contains(last, "pageSize=100") {
+		t.Errorf("the default page size was not 100: %s", last)
+	}
+}
+
 // TestDomainsDataSourcePagingGuardWarning asserts the incomplete-list warning
 // directly. terraform-plugin-testing cannot observe a warning diagnostic from
 // a data source read through the harness, so this test drives the protocol 6

@@ -34,31 +34,12 @@ func NewContactsDataSource() datasource.DataSource {
 }
 
 // contactProfileModel is one nested contacts element: the profile's contact_id
-// and default_profile plus every profile field, mapped through nullIfEmpty
+// and default_profile plus the shared contactFields, mapped through nullIfEmpty
 // exactly as the resource's state model is (§6.4).
 type contactProfileModel struct {
-	ContactID            types.String `tfsdk:"contact_id"`
-	DefaultProfile       types.Bool   `tfsdk:"default_profile"`
-	FirstName            types.String `tfsdk:"first_name"`
-	LastName             types.String `tfsdk:"last_name"`
-	Address              types.String `tfsdk:"address"`
-	Address2             types.String `tfsdk:"address2"`
-	City                 types.String `tfsdk:"city"`
-	State                types.String `tfsdk:"state"`
-	Zip                  types.String `tfsdk:"zip"`
-	Country              types.String `tfsdk:"country"`
-	Email                types.String `tfsdk:"email"`
-	Phone                types.String `tfsdk:"phone"`
-	Fax                  types.String `tfsdk:"fax"`
-	Company              types.String `tfsdk:"company"`
-	Nickname             types.String `tfsdk:"nickname"`
-	UsNexusCategory      types.String `tfsdk:"us_nexus_category"`
-	UsApplicationPurpose types.String `tfsdk:"us_application_purpose"`
-	CaLegalForm          types.String `tfsdk:"ca_legal_form"`
-	CaLanguage           types.String `tfsdk:"ca_language"`
-	CaAgreementVersion   types.String `tfsdk:"ca_agreement_version"`
-	CaWhoisDisplay       types.String `tfsdk:"ca_whois_display"`
-	EuCitizenshipCountry types.String `tfsdk:"eu_citizenship_country"`
+	contactFields
+	ContactID      types.String `tfsdk:"contact_id"`
+	DefaultProfile types.Bool   `tfsdk:"default_profile"`
 }
 
 // contactsDataSourceModel is namesilo_contacts' state model.
@@ -259,34 +240,16 @@ func contactProfileObjectType() types.ObjectType {
 	}}
 }
 
-// contactProfileToModel maps the client's Contact onto one nested element.
-// Every string field goes through nullIfEmpty, because the API returns unset
-// fields as empty elements and a null attribute is how the resource spells
-// that too (§6.4).
+// contactProfileToModel maps the client's Contact onto one nested element: the
+// shared contact-person fields plus the profile's contact_id and default_profile
+// flag. It is a thin adapter over contactFieldsFromContact, so the two models
+// cannot drift field-by-field; only the identifier's name differs (the resource
+// spells it id, the nested element contact_id).
 func contactProfileToModel(contact namesilo.Contact) contactProfileModel {
 	return contactProfileModel{
-		ContactID:            types.StringValue(contact.ID),
-		DefaultProfile:       types.BoolValue(contact.DefaultProfile),
-		FirstName:            nullIfEmpty(contact.FirstName),
-		LastName:             nullIfEmpty(contact.LastName),
-		Address:              nullIfEmpty(contact.Address),
-		Address2:             nullIfEmpty(contact.Address2),
-		City:                 nullIfEmpty(contact.City),
-		State:                nullIfEmpty(contact.State),
-		Zip:                  nullIfEmpty(contact.Zip),
-		Country:              nullIfEmpty(contact.Country),
-		Email:                nullIfEmpty(contact.Email),
-		Phone:                nullIfEmpty(contact.Phone),
-		Fax:                  nullIfEmpty(contact.Fax),
-		Company:              nullIfEmpty(contact.Company),
-		Nickname:             nullIfEmpty(contact.Nickname),
-		UsNexusCategory:      nullIfEmpty(contact.UsNexusCategory),
-		UsApplicationPurpose: nullIfEmpty(contact.UsApplicationPurpose),
-		CaLegalForm:          nullIfEmpty(contact.CaLegalForm),
-		CaLanguage:           nullIfEmpty(contact.CaLanguage),
-		CaAgreementVersion:   nullIfEmpty(contact.CaAgreementVersion),
-		CaWhoisDisplay:       nullIfEmpty(contact.CaWhoisDisplay),
-		EuCitizenshipCountry: nullIfEmpty(contact.EuCitizenshipCountry),
+		contactFields:  contactFieldsFromContact(contact),
+		ContactID:      types.StringValue(contact.ID),
+		DefaultProfile: types.BoolValue(contact.DefaultProfile),
 	}
 }
 

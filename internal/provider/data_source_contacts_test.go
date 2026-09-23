@@ -9,6 +9,7 @@ import (
 
 	fwdatasource "github.com/hashicorp/terraform-plugin-framework/datasource"
 	dsschema "github.com/hashicorp/terraform-plugin-framework/datasource/schema"
+	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
@@ -134,11 +135,22 @@ func contactObjectCheck(contact namesilo.Contact) knownvalue.Check {
 	})
 }
 
+// contactsNonPIIAttributes names the nested contacts attributes that are
+// deliberately not Sensitive: the resource's contactNonPIIAttributes with id
+// spelled contact_id. Every other nested attribute describes the contact person
+// and TestContactsDataSourceSchemaMasksPII requires it to be Sensitive, so the
+// nested PII markings cannot drift from the resource's (§6.4, §12.1).
+var contactsNonPIIAttributes = map[string]string{
+	"contact_id":      "an opaque account-scoped reference, needed as a plain value",
+	"default_profile": "account metadata, not personal data",
+}
+
 // TestContactsDataSourceSchemaMasksPII is the unit-level guard for the data
-// source's nested PII: every attribute that describes the contact person is
-// Sensitive, mirroring §6.4's GDPR markings through the nested object, while
-// contact_id and default_profile are not (id is an opaque reference,
-// default_profile is account metadata, not personal data).
+// source's nested PII. It walks every nested attribute rather than a hardcoded
+// list and asserts each is Sensitive unless it is in contactsNonPIIAttributes.
+// It also pins that the nested set mirrors the resource's attribute set exactly
+// (with id renamed contact_id), so a field added to one cannot go missing from
+// the other.
 func TestContactsDataSourceSchemaMasksPII(t *testing.T) {
 	t.Parallel()
 
@@ -158,27 +170,38 @@ func TestContactsDataSourceSchemaMasksPII(t *testing.T) {
 		t.Fatalf("contacts is %T, want SetNestedAttribute", attr)
 	}
 
-	pii := make(map[string]bool, len(contactPIIAttributes))
-	for _, name := range contactPIIAttributes {
-		pii[name] = true
-	}
 	for name, nested := range set.NestedObject.Attributes {
-		want := pii[name]
-		if got := nested.IsSensitive(); got != want {
-			t.Errorf("namesilo_contacts nested attribute %q: Sensitive is %v, want %v", name, got, want)
+		reason, exempt := contactsNonPIIAttributes[name]
+		switch {
+		case exempt && nested.IsSensitive():
+			t.Errorf("namesilo_contacts nested attribute %q is Sensitive, but %s", name, reason)
+		case !exempt && !nested.IsSensitive():
+			t.Errorf("namesilo_contacts nested attribute %q is not Sensitive; every contact-person field must be masked", name)
 		}
-		delete(pii, name)
 	}
-	for name := range pii {
-		t.Errorf("namesilo_contacts nested attributes are missing the PII attribute %q", name)
+
+	// The nested set must mirror the resource's fields exactly.
+	r := provider.NewContactResource()
+	var resourceResp fwresource.SchemaResponse
+	r.Schema(context.Background(), fwresource.SchemaRequest{}, &resourceResp)
+	if resourceResp.Diagnostics.HasError() {
+		t.Fatalf("namesilo_contact schema has diagnostics: %+v", resourceResp.Diagnostics)
 	}
-	for _, name := range []string{"contact_id", "default_profile"} {
+	for name := range resourceResp.Schema.Attributes {
+		nested := name
+		if name == "id" {
+			nested = "contact_id"
+		}
+		if _, ok := set.NestedObject.Attributes[nested]; !ok {
+			t.Errorf("namesilo_contacts nested attributes are missing %q (the resource's %q)", nested, name)
+		}
+	}
+	if got, want := len(set.NestedObject.Attributes), len(resourceResp.Schema.Attributes); got != want {
+		t.Errorf("namesilo_contacts has %d nested attributes, want the resource's %d", got, want)
+	}
+	for name := range contactsNonPIIAttributes {
 		if _, ok := set.NestedObject.Attributes[name]; !ok {
 			t.Errorf("namesilo_contacts nested attributes are missing %q", name)
 		}
-	}
-	if got := len(set.NestedObject.Attributes); got != len(contactPIIAttributes)+2 {
-		t.Errorf("namesilo_contacts has %d nested attributes, want %d (every PII field plus "+
-			"contact_id and default_profile)", got, len(contactPIIAttributes)+2)
 	}
 }

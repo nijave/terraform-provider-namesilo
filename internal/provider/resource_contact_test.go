@@ -22,22 +22,22 @@ import (
 	"github.com/nijave/terraform-provider-namesilo/internal/provider"
 )
 
-// contactPIIAttributes is §6.4's PII set: every attribute that describes the
-// contact person. TestContactSchemaMasksPII pins that each one is Sensitive so
-// the GDPR mapping cannot drift silently (§12.1).
-var contactPIIAttributes = []string{
-	"first_name", "last_name", "address", "address2", "city", "state", "zip",
-	"country", "email", "phone", "fax", "company", "nickname",
-	"us_nexus_category", "us_application_purpose",
-	"ca_legal_form", "ca_language", "ca_agreement_version", "ca_whois_display",
-	"eu_citizenship_country",
+// contactNonPIIAttributes names the namesilo_contact schema attributes that are
+// deliberately not Sensitive, with the reason. Every other attribute describes
+// the contact person, so TestContactSchemaMasksPII requires it to be Sensitive;
+// an attribute added to the schema without a sensitivity decision fails the
+// test until it is either marked Sensitive or added here (§6.4, §12.1).
+var contactNonPIIAttributes = map[string]string{
+	"id":              "an opaque account-scoped reference, needed as a plain value and as the import ID",
+	"default_profile": "account metadata, not personal data",
 }
 
 // TestContactSchemaMasksPII is the unit-level guard §12.1 asks for: it
-// instantiates the resource, calls Schema directly, and asserts the PII
-// mapping. id and default_profile are deliberately not Sensitive — id is an
-// opaque account-scoped reference and default_profile is account metadata, not
-// personal data (§6.4).
+// instantiates the resource, calls Schema directly, and walks every attribute
+// rather than a hardcoded PII list. Each attribute must be Sensitive unless it
+// is in contactNonPIIAttributes, so a new contact field cannot land without a
+// sensitivity decision, and id and default_profile cannot become Sensitive by
+// accident (§6.4).
 func TestContactSchemaMasksPII(t *testing.T) {
 	t.Parallel()
 
@@ -48,24 +48,18 @@ func TestContactSchemaMasksPII(t *testing.T) {
 		t.Fatalf("namesilo_contact schema has diagnostics: %+v", resp.Diagnostics)
 	}
 
-	for _, name := range contactPIIAttributes {
-		attr, ok := resp.Schema.Attributes[name]
-		if !ok {
-			t.Errorf("namesilo_contact schema has no %q attribute", name)
-			continue
-		}
-		if !attr.IsSensitive() {
-			t.Errorf("namesilo_contact attribute %q is not Sensitive; PII must be masked", name)
+	for name, attr := range resp.Schema.Attributes {
+		reason, exempt := contactNonPIIAttributes[name]
+		switch {
+		case exempt && attr.IsSensitive():
+			t.Errorf("namesilo_contact attribute %q is Sensitive, but %s", name, reason)
+		case !exempt && !attr.IsSensitive():
+			t.Errorf("namesilo_contact attribute %q is not Sensitive; every contact-person field must be masked", name)
 		}
 	}
-	for _, name := range []string{"id", "default_profile"} {
-		attr, ok := resp.Schema.Attributes[name]
-		if !ok {
+	for name := range contactNonPIIAttributes {
+		if _, ok := resp.Schema.Attributes[name]; !ok {
 			t.Errorf("namesilo_contact schema has no %q attribute", name)
-			continue
-		}
-		if attr.IsSensitive() {
-			t.Errorf("namesilo_contact attribute %q is Sensitive, but it is not PII", name)
 		}
 	}
 }
@@ -232,7 +226,10 @@ func TestAccContactCreate(t *testing.T) {
 				expectContactString("id", "1001"),
 				expectContactBool(false),
 				expectContactString("first_name", "Ada"),
-				// country is uppercased at plan time, then echoed by the fake.
+				// The config sets the canonical uppercase code, so the fake
+				// echoes it unchanged. A non-canonical code never reaches the
+				// plan: the validator rejects it at validate time (see
+				// TestAccContactValidationRejectsNonCanonicalValues).
 				expectContactString("country", "GB"),
 			},
 			ConfigPlanChecks: expectEmptyAfterRefresh(),
@@ -258,6 +255,57 @@ func TestAccContactCreate(t *testing.T) {
 				}
 			},
 		}},
+	})
+}
+
+// TestAccContactValidationRejectsNonCanonicalValues drives
+// ValidateResourceConfig through real OpenTofu, so it covers the schema wiring
+// and not just the validator functions. country must be an uppercase two-letter
+// code, and an optional string must be omitted rather than set to "": both are
+// rejected at validate time with the message a practitioner sees, and the
+// canonical form applies and stays quiet.
+func TestAccContactValidationRejectsNonCanonicalValues(t *testing.T) {
+	requireTofu(t)
+	fake := newFakeNamesilo()
+	defer fake.Close()
+
+	canonical := contactConfig(fake.URL(), fullContact().attrs(true))
+
+	lowerCountry := fullContact()
+	lowerCountry.Country = "us"
+	lowerConfig := contactConfig(fake.URL(), lowerCountry.attrs(true))
+
+	emptyCompany := fullContact()
+	emptyCompany.Company = ""
+	emptyConfig := contactConfig(fake.URL(), emptyCompany.attrs(true))
+
+	resource.Test(t, resource.TestCase{
+		IsUnitTest:               true,
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: canonical,
+				ConfigStateChecks: []statecheck.StateCheck{
+					expectContactString("country", "GB"),
+				},
+				ConfigPlanChecks: expectEmptyAfterRefresh(),
+			},
+			{
+				// Match a short fragment: OpenTofu wraps the diagnostic detail
+				// at the terminal width, so a longer pattern can be split by a
+				// newline.
+				Config:      lowerConfig,
+				ExpectError: regexp.MustCompile("use an uppercase two-letter"),
+			},
+			{
+				Config:      emptyConfig,
+				ExpectError: regexp.MustCompile("An empty string is not a valid value"),
+			},
+			{
+				Config:           canonical,
+				ConfigPlanChecks: expectEmptyAfterRefresh(),
+			},
+		},
 	})
 }
 

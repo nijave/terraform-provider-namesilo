@@ -902,7 +902,8 @@ func contactFromQuery(query map[string][]string) namesilo.Contact {
 // skeleton: the full snake_case element names, not the request's short
 // parameter names, and a self-closing empty element for each unset scalar.
 //
-// The country-specific elements (us_nexus_category and the rest) are omitted
+// The country-specific elements (usnc and the rest, spelled with the
+// abbreviated request names per the reference's sample reply) are omitted
 // entirely when unset, the shape the captured profiles show: unlike company,
 // address2, and fax, the API does not emit empty placeholders for them. Values
 // the provider writes are still echoed so they round-trip through read.
@@ -929,13 +930,13 @@ func contactReply(contact namesilo.Contact) string {
 	writeContactElement(&b, "phone", contact.Phone)
 	writeContactElement(&b, "fax", contact.Fax)
 	for _, e := range []struct{ tag, value string }{
-		{"us_nexus_category", contact.UsNexusCategory},
-		{"us_application_purpose", contact.UsApplicationPurpose},
-		{"ca_legal_form", contact.CaLegalForm},
-		{"ca_language", contact.CaLanguage},
-		{"ca_agreement_version", contact.CaAgreementVersion},
-		{"ca_whois_display", contact.CaWhoisDisplay},
-		{"eu_citizenship_country", contact.EuCitizenshipCountry},
+		{"usnc", contact.UsNexusCategory},
+		{"usap", contact.UsApplicationPurpose},
+		{"calf", contact.CaLegalForm},
+		{"caln", contact.CaLanguage},
+		{"caag", contact.CaAgreementVersion},
+		{"cawd", contact.CaWhoisDisplay},
+		{"eucs", contact.EuCitizenshipCountry},
 	} {
 		if e.value != "" {
 			writeContactElement(&b, e.tag, e.value)

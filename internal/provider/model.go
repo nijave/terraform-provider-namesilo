@@ -66,13 +66,42 @@ func nullIfEmpty(value string) types.String {
 	return types.StringValue(value)
 }
 
-// contactToModel maps the client's Contact onto the resource's state model.
-// Every string field goes through nullIfEmpty, because the API returns unset
-// fields as empty elements; a required field that arrives empty therefore
-// becomes null and diffs, which is the honest report of an API anomaly rather
-// than a silent empty value (§6.4).
-func contactToModel(contact namesilo.Contact) contactResourceModel {
-	return contactResourceModel{
+// contactFields is the contact-person field set shared by the namesilo_contact
+// resource's state model and the namesilo_contacts data source's nested model.
+// Both embed it, so one mapping function fills it and the two cannot drift
+// field-by-field (§6.4).
+type contactFields struct {
+	FirstName            types.String `tfsdk:"first_name"`
+	LastName             types.String `tfsdk:"last_name"`
+	Address              types.String `tfsdk:"address"`
+	Address2             types.String `tfsdk:"address2"`
+	City                 types.String `tfsdk:"city"`
+	State                types.String `tfsdk:"state"`
+	Zip                  types.String `tfsdk:"zip"`
+	Country              types.String `tfsdk:"country"`
+	Email                types.String `tfsdk:"email"`
+	Phone                types.String `tfsdk:"phone"`
+	Fax                  types.String `tfsdk:"fax"`
+	Company              types.String `tfsdk:"company"`
+	Nickname             types.String `tfsdk:"nickname"`
+	UsNexusCategory      types.String `tfsdk:"us_nexus_category"`
+	UsApplicationPurpose types.String `tfsdk:"us_application_purpose"`
+	CaLegalForm          types.String `tfsdk:"ca_legal_form"`
+	CaLanguage           types.String `tfsdk:"ca_language"`
+	CaAgreementVersion   types.String `tfsdk:"ca_agreement_version"`
+	CaWhoisDisplay       types.String `tfsdk:"ca_whois_display"`
+	EuCitizenshipCountry types.String `tfsdk:"eu_citizenship_country"`
+}
+
+// contactFieldsFromContact is the single mapping from the client's Contact onto
+// the shared contact-person field set. Every string field goes through
+// nullIfEmpty, because the API returns unset fields as empty elements; a
+// required field that arrives empty therefore becomes null and diffs, which is
+// the honest report of an API anomaly rather than a silent empty value (§6.4).
+// TestContactToModelMapsEveryContactField pins that every field of
+// namesilo.Contact is carried here.
+func contactFieldsFromContact(contact namesilo.Contact) contactFields {
+	return contactFields{
 		FirstName:            nullIfEmpty(contact.FirstName),
 		LastName:             nullIfEmpty(contact.LastName),
 		Address:              nullIfEmpty(contact.Address),
@@ -93,8 +122,17 @@ func contactToModel(contact namesilo.Contact) contactResourceModel {
 		CaAgreementVersion:   nullIfEmpty(contact.CaAgreementVersion),
 		CaWhoisDisplay:       nullIfEmpty(contact.CaWhoisDisplay),
 		EuCitizenshipCountry: nullIfEmpty(contact.EuCitizenshipCountry),
-		DefaultProfile:       types.BoolValue(contact.DefaultProfile),
-		ID:                   types.StringValue(contact.ID),
+	}
+}
+
+// contactToModel maps the client's Contact onto the resource's state model: the
+// shared contact-person fields plus the account-scoped id and default_profile
+// flag (§6.4).
+func contactToModel(contact namesilo.Contact) contactResourceModel {
+	return contactResourceModel{
+		contactFields:  contactFieldsFromContact(contact),
+		DefaultProfile: types.BoolValue(contact.DefaultProfile),
+		ID:             types.StringValue(contact.ID),
 	}
 }
 
