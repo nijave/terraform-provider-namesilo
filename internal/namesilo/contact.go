@@ -37,12 +37,13 @@ type Contact struct {
 }
 
 // contactXML is one <contact> element in a contactList reply. The reply uses
-// the full snake_case element names, not the short forms the request carries:
-// nickname, company, first_name, and so on, while the request parameters are
-// nn, cp, fn. The TLD-specific elements (us_nexus_category, and the rest)
-// follow the same reply convention but were not exercised by the live probe,
-// because its profiles set none of them. Unset fields arrive as empty elements
-// and decode to empty strings (§8.4).
+// the full snake_case element names for the base fields, not the short forms
+// the request carries: nickname, company, first_name, and so on, while the
+// request parameters are nn, cp, fn. The TLD-specific fields are the
+// exception: the reply keeps the abbreviated request names (usnc, calf, …),
+// per the reference's own sample reply — the one spelling no live probe has
+// confirmed, because no profile with those fields set has been read yet.
+// Unset fields arrive as empty elements and decode to empty strings (§8.4).
 type contactXML struct {
 	ContactID      string `xml:"contact_id"`
 	DefaultProfile string `xml:"default_profile"`
@@ -60,13 +61,13 @@ type contactXML struct {
 	Email                string `xml:"email"`
 	Phone                string `xml:"phone"`
 	Fax                  string `xml:"fax"`
-	UsNexusCategory      string `xml:"us_nexus_category"`
-	UsApplicationPurpose string `xml:"us_application_purpose"`
-	CaLegalForm          string `xml:"ca_legal_form"`
-	CaLanguage           string `xml:"ca_language"`
-	CaAgreementVersion   string `xml:"ca_agreement_version"`
-	CaWhoisDisplay       string `xml:"ca_whois_display"`
-	EuCitizenshipCountry string `xml:"eu_citizenship_country"`
+	UsNexusCategory      string `xml:"usnc"`
+	UsApplicationPurpose string `xml:"usap"`
+	CaLegalForm          string `xml:"calf"`
+	CaLanguage           string `xml:"caln"`
+	CaAgreementVersion   string `xml:"caag"`
+	CaWhoisDisplay       string `xml:"cawd"`
+	EuCitizenshipCountry string `xml:"eucs"`
 }
 
 // parseDefaultProfile reads the API's default_profile element. Only 1 and 0
