@@ -196,11 +196,11 @@ jobs:
       # module's packages from the repo root.
       - name: Build go-licenses
         run: (cd tools && go build -o "$RUNNER_TEMP/go-licenses" github.com/google/go-licenses)
-      # The project is GPL-3.0-or-later, so every dependency must be
-      # GPLv3-compatible. The forbidden set is what actually threatens that:
-      # BUSL-1.1 (Terraform CLI since 1.6) and the copyleft-incompatible
-      # licenses. Apache-2.0 is allowed because this is GPLv3, not GPLv2. If the
-      # license is ever downgraded, re-audit spec section 13 first.
+      # The project is MPL-2.0, so dependencies may carry any OSI license that
+      # can be combined with it, including Apache-2.0 and GPL-family licenses.
+      # The forbidden set is what actually threatens that: BUSL-1.1 (Terraform
+      # CLI since 1.6) and the copyleft-incompatible or non-OSI licenses. If the
+      # license ever changes again, re-audit spec section 13 first.
       - name: Check licenses
         run: |
           "$RUNNER_TEMP/go-licenses" check ./... \

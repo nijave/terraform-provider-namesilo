@@ -218,7 +218,7 @@ terraform-provider-namesilo/
   .github/workflows/{test.yml,release.yml}
   .github/dependabot.yml
   .gitignore
-  LICENSE                              # GPL-3.0
+  LICENSE                              # MPL-2.0
   README.md
 ```
 
@@ -1184,9 +1184,11 @@ lockstep, and covers the `tools` module separately.
 
 ## 15. License
 
-GPL-3.0-or-later, matching the siblings. Every `.go` file begins with
-`// SPDX-License-Identifier: GPL-3.0-or-later`. Dependencies must be
-GPLv3-compatible; with the own-client decision the audited set is the
+MPL-2.0, matching every other Terraform provider. Every `.go` file begins with
+`// SPDX-License-Identifier: MPL-2.0`. File-level copyleft keeps modifications
+to existing files open without forcing the whole provider onto downstream
+users; dependencies may carry any OSI license combinable with MPL-2.0, and with
+the own-client decision the audited set is the
 Hashicorp MPL-2.0 framework modules, BSD-3-Clause, MIT, and Apache-2.0.
 Nothing under BUSL-1.1 may be linked or downloaded: a provider is a separate
 process speaking gRPC, so Terraform CLI is not a dependency, and CI installs

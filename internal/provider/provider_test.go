@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
 package provider_test
 
@@ -254,7 +254,7 @@ func TestEveryGoFileHasTheSPDXHeader(t *testing.T) {
 	t.Parallel()
 
 	const root = "../.."
-	const want = "// SPDX-License-Identifier: GPL-3.0-or-later"
+	const want = "// SPDX-License-Identifier: MPL-2.0"
 	skipDirs := map[string]bool{
 		".git":         true,
 		".claude":      true,
