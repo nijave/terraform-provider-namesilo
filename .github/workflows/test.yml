@@ -195,7 +195,7 @@ jobs:
       # Build the binary from the tools module, then run it against the root
       # module's packages from the repo root.
       - name: Build go-licenses
-        run: (cd tools && go build -o "$RUNNER_TEMP/go-licenses" github.com/google/go-licenses)
+        run: (cd tools && go build -o "$RUNNER_TEMP/go-licenses" github.com/google/go-licenses/v2)
       # The project is MPL-2.0, so dependencies may carry any OSI license that
       # can be combined with it, including Apache-2.0 and GPL-family licenses.
       # The forbidden set is what actually threatens that: BUSL-1.1 (Terraform
