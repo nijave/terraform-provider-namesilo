@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MPL-2.0
 
 // Package namesilo is a client for the NameSilo registrar API. It is pure Go:
 // no Terraform imports and no third-party dependencies, so every decision it

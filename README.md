@@ -139,5 +139,5 @@ make docs         # regenerate docs/ ; requires tofu >= 1.11
 
 ## License
 
-GPL-3.0-or-later. Every dependency is GPL-compatible (MPL-2.0, BSD-3-Clause,
-MIT, or Apache-2.0). See [LICENSE](LICENSE).
+MPL-2.0, matching the rest of the Terraform provider ecosystem. Every `.go` file
+begins with `// SPDX-License-Identifier: MPL-2.0`. See [LICENSE](LICENSE).
